@@ -44,6 +44,14 @@ spring:
       max-file-size: 10MB
       max-request-size: 10MB
 
+  # FormContentFilter runs before Spring Security and AnonymousBodyLimitFilter and reads a whole
+  # form-encoded PUT/PATCH/DELETE body into memory, on any path, with no limit. The API takes
+  # JSON only, so it is off.
+  mvc:
+    formcontent:
+      filter:
+        enabled: false
+
   # MCP_PROTOCOL=STREAMABLE enables protocol 2025-11-25 for hosted connectors. SSE remains the
   # default for existing clients. Both transports stay under /mcp/** for access-key/OAuth scoping.
   ai:
