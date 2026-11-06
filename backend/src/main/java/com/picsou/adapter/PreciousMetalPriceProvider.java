@@ -38,7 +38,8 @@ import java.util.regex.Pattern;
  * Loomis FXGS (formerly CPoR Devises), the French reference for gold coin prices; one public page
  * lists every product, so a batch of coins costs a single request.
  *
- * <p>Loomis publishes no reachable history, so coins have no historical series; their intraday
+ * <p>Loomis's only coin history ({@code POST /ajax}, action {@code loomis_load_chart_gold}) is one
+ * point per month or more, not daily closes, so coins have no historical series; their intraday
  * series is the current quote held flat. A suspended quote ({@code Cotation suspendue}) is absent
  * from the result, never zero. Upstream failures are logged and omitted, per the
  * {@link PriceProviderPort} contract.

@@ -59,7 +59,7 @@ PriceService ──► CompositePriceProvider ──► PreciousMetalPriceProvid
 | New `AccountType` | `WealthTier.of` is an exhaustive switch; the type picks `ALTERNATIVE` explicitly and the `METALS` filter gets a type of its own | A holding kind on `OTHER`: the filter would keep listing every `OTHER` account |
 | Positions, not a balance | A user holds several products in one safe; each is priced on its own | One balance per account, typed by hand |
 | Closed ticker catalogue with a `GOLD:` prefix | The `:` fails Yahoo's symbol pattern, so the logo, security-profile and dividend jobs never send these tickers to Yahoo | Free-text tickers |
-| Coin quote from Loomis FXGS | Daily reference quote for French gold coins, premium included, one page for every coin | Dealer sites (buy/sell spreads differ per dealer); weight × spot (misses the premium) |
+| Coin quote from the Loomis FXGS page | Daily reference quote for French gold coins, premium included, one page for every coin; the page is server-rendered, no request carries today's quotes | Dealer sites (buy/sell spreads differ per dealer); weight × spot (misses the premium) |
 | `GC=F` for spot | Already reachable through the Yahoo adapter and its FX conversion | `XAUEUR=X` (404 on Yahoo) |
 
 ## Gotchas / Pitfalls
@@ -67,7 +67,10 @@ PriceService ──► CompositePriceProvider ──► PreciousMetalPriceProvid
 - `GC=F` is the COMEX front-month future, a little above spot. The gap is small next to coin premiums.
 - Loomis publishes one quote per business day. A suspended coin (`Cotation suspendue`) is absent
   from the result, so `PriceService` falls back to its last recorded price, like any unpriced ticker.
-- No price history is reachable for coins, so their daily history call returns nothing and the
+- Coins get no backfilled history. Loomis's chart endpoint (`POST https://www.loomis-fxgs.fr/ajax`,
+  `action=loomis_load_chart_gold&productid=<id>&format=6months|1year|2years|5years`) returns one
+  point per month (6 months) up to one per year (5 years), labelled "Mai 2026" rather than dated:
+  too coarse for daily snapshots. So their daily history call returns nothing and the
   account's history starts from the daily snapshots taken after the account exists. Their
   intraday series (24H chart, `GET /api/prices/{ticker}/intraday`) is the current quote held flat
   every hour: Loomis publishes one quote per business day, so flat is the truth. The first point
