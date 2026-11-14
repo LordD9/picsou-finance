@@ -3,6 +3,7 @@ package com.picsou.service;
 import com.picsou.adapter.sidecar.SidecarBank;
 import com.picsou.config.CryptoEncryption;
 import com.picsou.exception.SyncException;
+import com.picsou.finary.FinaryPersistenceHelper;
 import com.picsou.model.Account;
 import com.picsou.model.AccountHolding;
 import com.picsou.model.AccountType;
@@ -271,7 +272,7 @@ class CaisseEpargneSyncServiceTest {
             mock(AccountAccessResolver.class), mock(BankLogoResolver.class), mock(CryptoLogoService.class),
             mock(InstrumentLogoService.class), mock(ScpiPositionRepository.class), mock(ScpiFundService.class),
             mock(PeerLoanTermsRepository.class), mock(PeerLoanRepaymentRepository.class),
-            mock(PeerLoanTransactionLinks.class));
+            mock(PeerLoanTransactionLinks.class), mock(FinaryPersistenceHelper.class));
         when(perService.prepare(detail, "EUR")).thenReturn(prepared);
         CaisseEpargneSyncService sync = serviceWith(txTemplate, Runnable::run, actualAccountService);
         arrangeCommittableSync(withPer);
@@ -383,6 +384,9 @@ class CaisseEpargneSyncServiceTest {
             assertThat(CaisseEpargneSyncService.isInsurerContract(
                 Account.builder().type(type).provider(CaisseEpargneSyncService.PROVIDER).isManual(false).build()))
                 .as(type.name()).isEqualTo(expected);
+            assertThat(CaisseEpargneSyncService.isInsurerContract(
+                Account.builder().type(type).provider("Banque Populaire Rives de Paris").externalAccountId("bp_contract:1").isManual(false).build()))
+                .as("bp " + type.name()).isEqualTo(expected);
             // A hand-made account never qualifies, even if the member typed this provider.
             assertThat(CaisseEpargneSyncService.isInsurerContract(
                 Account.builder().type(type).provider(CaisseEpargneSyncService.PROVIDER).isManual(true).build()))

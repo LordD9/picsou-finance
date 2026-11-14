@@ -930,8 +930,9 @@
       "revolut": "Phone + passcode, on-demand sync",
       "fortuneo": "Fortuneo-Konten synchronisieren",
       "caisseEpargne": "Girokonto, Livret A, LDDS, PEL, LEP, PER, Lebensversicherung, Kredite und Karten bei der Caisse d'Epargne",
-      "banquePopulaire": "Girokonto, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, Festgeld und Genossenschaftsanteile bei der Banque Populaire",
-      "lbp": "Girokonto, Livret A und LEP bei La Banque Postale"
+      "banquePopulaire": "Girokonto, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, Festgeld, Genossenschaftsanteile und PER bei der Banque Populaire",
+      "lbp": "Girokonto, Livret A und LEP bei La Banque Postale",
+      "bnp": "Girokonten, Sparprodukte, Wertpapiere und Lebensversicherung bei BNP Paribas oder Hello bank!"
     }
   },
   "sync": {
@@ -976,7 +977,7 @@
     "tr": {
       "title": "Trade Republic",
       "phone": "Telefonnummer",
-      "pin": "PIN-Code",
+      "pin": "PIN oder Passwort",
       "tan": "TAN-Code",
       "connect": "Verbinden",
       "sync": "Synchronisieren",
@@ -987,16 +988,16 @@
       "errors": {
         "tooManyAttempts": "Zu viele Versuche. Bitte warte ein paar Minuten.",
         "invalidPhoneNumber": "Ungültige Telefonnummer.",
-        "invalidPin": "Falsche PIN.",
+        "invalidPin": "Falsche PIN oder falsches Passwort.",
         "invalidTan": "Der Bestätigungscode ist falsch oder abgelaufen. Verwende den zuletzt erhaltenen Code oder starte den Schritt neu, um einen neuen zu erhalten.",
         "authenticationFailed": "Trade-Republic-Authentifizierung fehlgeschlagen.",
         "serviceUnavailable": "Der lokale Trade-Republic-Dienst ist nicht verfügbar. Starte die Server neu und versuche es erneut.",
         "serverError": "Trade-Republic-Serverfehler. Bitte versuche es erneut.",
         "phoneNumberRequired": "Telefonnummer ist erforderlich.",
-        "pinRequired": "PIN ist erforderlich.",
+        "pinRequired": "PIN oder Passwort ist erforderlich.",
         "validationFailed": "Ungültige Daten.",
         "unknownError": "Ein unerwarteter Fehler ist aufgetreten.",
-        "invalidCredentials": "Falsche Trade-Republic-Telefonnummer oder PIN.",
+        "invalidCredentials": "Falsche Trade-Republic-Telefonnummer oder falsche PIN/falsches Passwort.",
         "appValidationTimeout": "Die Anmeldung wurde nicht rechtzeitig in der App bestätigt. Bitte erneut beginnen.",
         "appValidationCancelled": "Die Anmeldung wurde in der Trade-Republic-App abgelehnt. Bitte erneut beginnen.",
         "authAttemptExpired": "Der Anmeldeversuch ist abgelaufen. Bitte erneut beginnen.",
@@ -1008,7 +1009,11 @@
       "queued": "Synchronisierung eingeplant…",
       "syncing": "Synchronisierung läuft…",
       "syncSuccess": "Letzte Synchronisierung erfolgreich.",
-      "staleAccounts": "Deine Trade-Republic-Konten werden nicht mehr aktualisiert: Ihre Sitzung ist beendet. Melde dich unten erneut an, um die tägliche Synchronisierung fortzusetzen."
+      "staleAccounts": "Deine Trade-Republic-Konten werden nicht mehr aktualisiert: Ihre Sitzung ist beendet. Melde dich unten erneut an, um die tägliche Synchronisierung fortzusetzen.",
+      "authenticatorCode": "Authenticator-Code",
+      "authenticatorPrompt": "Gib den 6-stelligen Code aus deiner Authenticator-App ein und bestätige danach die Anmeldung in der Trade-Republic-App.",
+      "reconnectPhone": "Telefonnummer",
+      "useAnotherNumber": "Andere Nummer verwenden"
     },
     "ibkr": {
       "title": "Interactive Brokers",
@@ -1284,7 +1289,7 @@
       "openFinary": "Finary-Seite zum Synchronisieren öffnen",
       "sessionExpired": "Sitzung abgelaufen",
       "reconnect": "Im Tab des Anbieters neu verbinden",
-      "trManualInfo": "Trade Republic ist die einzige Bank, die eine manuelle erneute Authentifizierung erfordert. Du musst bei jeder Synchronisierung deine Telefonnummer und PIN neu eingeben.",
+      "trManualInfo": "Trade-Republic-Sitzungen enden nach etwa 24 Stunden. Gib zum erneuten Verbinden deine PIN oder dein Passwort ein; die Telefonnummer bleibt gespeichert.",
       "trSlowWarning": "Die Verbindung kann einen Moment dauern, das ist normal.",
       "openRevolut": "Open the Revolut page to connect",
       "revolutManualInfo": "Revolut requires approval on your phone. Click the icon to enter your credentials."
@@ -1392,7 +1397,7 @@
       "disconnectConfirmAction": "Gespeicherte Sitzung löschen",
       "noSession": "Keine aktive Sitzung",
       "sessionActive": "Sitzung aktiv",
-      "scope": "Synchronisiert Ihre Girokonten, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, Festgelder und Genossenschaftsanteile bei der Banque Populaire auf Abruf. Nur die Sitzung und Ihre Kennung werden verschlüsselt gespeichert, nie Ihr Passwort. Verträge, die Picsou nicht importieren kann, werden aufgelistet, aber nie angelegt.",
+      "scope": "Synchronisiert Ihre Girokonten, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, Festgelder, Genossenschaftsanteile und PER bei der Banque Populaire auf Abruf. Nur die Sitzung und Ihre Kennung werden verschlüsselt gespeichert, nie Ihr Passwort. Verträge, die Picsou nicht importieren kann, werden aufgelistet, aber nie angelegt.",
       "notice": {
         "neverStored": "Picsou sieht und speichert Ihr Passwort nie. Sie klicken es selbst auf der Tastatur der Bank; nur die Tastenpositionen werden einmalig gesendet.",
         "noRetry": "Picsou wiederholt eine Anmeldung nie. Schlägt sie fehl, wird nichts erneut gesendet, bis Sie das Formular selbst absenden.",
@@ -1846,6 +1851,73 @@
         "formatChanged": "Fortuneo hat sein Portfolioformat geändert. Deine vorhandenen Daten wurden nicht verändert.",
         "invalidData": "Fortuneo hat widersprüchliche Portfoliodaten geliefert. Deine vorhandenen Daten wurden nicht verändert.",
         "serverError": "Fortuneo konnte nicht erreicht werden. Bitte erneut versuchen."
+      }
+    },
+    "bnp": {
+      "title": "BNP Paribas / Hello bank!",
+      "customerId": "Kundennummer",
+      "brand": "Bank",
+      "brands": {
+        "bnp": "BNP Paribas",
+        "hellobank": "Hello bank!"
+      },
+      "connect": "Verbinden",
+      "connecting": "Verbinde…",
+      "sync": "Synchronisieren",
+      "queued": "Synchronisierung eingereiht…",
+      "syncing": "Synchronisiere…",
+      "syncSuccess": "Letzte Synchronisierung erfolgreich.",
+      "clearSession": "Trennen",
+      "disconnectConfirm": "Die gespeicherte BNP-Paribas-/Hello-bank!-Sitzung aus Picsou löschen? Die Sitzung bei der Bank wird nicht beendet.",
+      "disconnectConfirmAction": "Sitzung löschen",
+      "noSession": "Keine Sitzung",
+      "sessionActive": "Sitzung aktiv",
+      "scope": "Importiert Girokonten, Sparprodukte, Depots (PEA, Wertpapierdepot) mit ihren Positionen, Lebensversicherung (nur Saldo) und Kredite, soweit die Website der Bank sie anzeigt. Produkte, die Picsou nicht kennt, werden aufgelistet, nie geraten.",
+      "notice": {
+        "neverStored": "Dein Passwort wird nie gespeichert: Du klickst es auf der Tastatur der Bank, die unten angezeigt wird.",
+        "noRetry": "Es gibt nur einen Versuch. Ein falsches Passwort zählt für das Limit der Bank und nichts wird automatisch wiederholt.",
+        "lockRisk": "Zu viele falsche Versuche können Deinen Zugang bei der Bank sperren.",
+        "unverified": "Noch nicht an einem echten Konto geprüft: Die Anmeldeseite wurde geprüft, die Zwei-Faktor-Anmeldung und der Import folgen dem Open-Source-Modul woob."
+      },
+      "approvalPrompt": "Bestätige die Anmeldung in der mobilen App Deiner Bank.",
+      "approvalHint": "Diese Seite wartet auf Deine Bestätigung und importiert dann Deine Konten.",
+      "countdownLabel": "Verbleibende Zeit:",
+      "codePrompt": "Gib den Code ein, den die Bank Dir per SMS geschickt hat.",
+      "codeHint": "Der Code wird einmal an die Bank gesendet und nie gespeichert.",
+      "code": "SMS-Code",
+      "sendCode": "Code senden",
+      "sendingCode": "Sende…",
+      "unsupportedTitle": "Nicht importierte Produkte",
+      "unsupportedHint": "Picsou importiert diese Produkte noch nicht. Angezeigt wird nur der Produktfamilien-Code.",
+      "errors": {
+        "invalidIdentifier": "Die Kundennummer muss 7 bis 10 Ziffern haben.",
+        "invalidCredentials": "Die Bank hat diese Zugangsdaten abgelehnt. Warte, bevor Du es erneut versuchst.",
+        "invalidCode": "Der Code ist falsch. Prüfe die SMS und versuche es erneut.",
+        "keypadChanged": "Die Anmeldeseite der Bank hat sich geändert. Es wurde nichts gesendet.",
+        "keypadExpired": "Die Tastatur ist abgelaufen. Beginne neu.",
+        "invalidPositions": "Die Tastatur-Antwort wurde abgelehnt. Beginne neu.",
+        "mfaUnsupported": "Dieser zweite Faktor wird von Picsou nicht unterstützt.",
+        "actionRequired": "Die Bank verlangt eine Aktion auf ihrer eigenen Website (Passwortwechsel oder Reaktivierung).",
+        "rateLimited": "Zu viele Versuche. Warte, bevor Du es erneut versuchst.",
+        "rateLimitedRetryAfter": "Zu viele Versuche. Versuche es in etwa {{minutes}} Min. erneut.",
+        "tooManySyncs": "Zu viele Synchronisierungen. Warte, bevor Du es erneut versuchst.",
+        "tooManySyncsRetryAfter": "Zu viele Synchronisierungen. Versuche es in etwa {{minutes}} Min. erneut.",
+        "appValidationTimeout": "Die Bestätigung kam nicht rechtzeitig an. Beginne neu.",
+        "authAttemptExpired": "Dieser Anmeldeversuch ist abgelaufen. Beginne neu.",
+        "sessionExpired": "Die Sitzung ist abgelaufen. Melde Dich erneut an.",
+        "formatChanged": "Die Website der Bank sieht nicht mehr wie erwartet aus. Es wurde nichts importiert.",
+        "invalidSessionState": "Die gespeicherte Sitzung ist unbrauchbar. Melde Dich erneut an.",
+        "serverError": "Etwas ist schiefgelaufen. Versuche es später erneut."
+      },
+      "keypad": {
+        "title": "Passwort anklicken",
+        "description": "Klicke die Tasten mit den sechs Ziffern Deines Passworts der Reihe nach an. Die Tasten werden von der Bank gemischt. Picsou sieht Deine Ziffern nicht.",
+        "key": "Taste {{position}}",
+        "entered": "{{count}} von 6 Ziffern eingegeben",
+        "countdownLabel": "Verbleibende Zeit:",
+        "cancel": "Abbrechen",
+        "clear": "Löschen",
+        "validate": "Bestätigen"
       }
     }
   },

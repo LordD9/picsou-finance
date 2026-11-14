@@ -1,6 +1,6 @@
 # Feature: Trade Republic Sync
 
-> Last updated: 2026-11-03 (sessions move to the shared `sidecar_session` table; in-app confirmation login)
+> Last updated: 2026-11-05 (password and authenticator login, one-field reconnect with the stored phone)
 
 ## Context
 
@@ -10,13 +10,22 @@ Trade Republic is a German neobroker popular in France. Picsou syncs portfolio b
 
 ### Authentication (delegated to the `tr-auth` sidecar)
 
-`TradeRepublicAdapter` calls three endpoints of the sidecar through the shared `SidecarClient`, which keeps the sidecar's `{"detail": CODE}` as the `SyncException` code:
+`TradeRepublicAdapter` calls four endpoints of the sidecar through the shared `SidecarClient`, which keeps the sidecar's `{"detail": CODE}` as the `SyncException` code:
 
-1. **`POST /initiate`** -- Sends phone number + PIN. Returns `{processId, flow, countdownInSeconds}`. `flow` is `confirmInApp` (the member confirms in the Trade Republic app) or `otp` (TR fell back to a 4-digit code).
-2. **`POST /complete`** -- Sends `processId` and `tan` (`null` for `confirmInApp`). Blocks while the member confirms, up to 120 s in the sidecar and 150 s in the adapter, then returns an opaque `sessionState`. The 120 s is one deadline over the whole wait: a poll or a WAF token refresh still running when it passes is cancelled, so the sidecar answers `APP_VALIDATION_TIMEOUT` before the adapter gives up. The adapter always sends the `tan` key, with an explicit `null`, because the sidecar forbids unknown fields but declares it.
+1. **`POST /initiate`** -- Sends phone number + PIN or password. Returns `{processId, flow, countdownInSeconds}`. `flow` is `confirmInApp` (the member confirms in the Trade Republic app), `otp` (TR fell back to a 4-digit code) or `authenticator` (the 6-digit code of the member's authenticator app).
+2. **`POST /complete`** -- Sends `processId` and `tan` (`null` for `confirmInApp`; 4 digits for `otp`, 6 digits for `authenticator`). Blocks while the member confirms, up to 120 s in the sidecar and 150 s in the adapter, then returns an opaque `sessionState`. The 120 s is one deadline over the whole wait: a poll or a WAF token refresh still running when it passes is cancelled, so the sidecar answers `APP_VALIDATION_TIMEOUT` before the adapter gives up. The adapter always sends the `tan` key, with an explicit `null`, because the sidecar forbids unknown fields but declares it.
 3. **`POST /session`** -- Sends the stored `sessionState`. Returns `{sessionToken, claims}`: a live `tr_session` cookie value and the decoded claims, which list the securities and cash accounts in `act.acc.owner`. The refresh cookie is not rotated, so the stored state never changes.
+4. **`POST /transactions`** -- Sends the stored `sessionState`, `from` and `to`. Returns Trade Republic's CSV export of the activity over that window, unchanged (see [Automatic transaction import](#automatic-transaction-import)).
 
-Phone number and PIN are never stored: they are used for the `/initiate` call and dropped. The state holds only the refresh cookie, the device cookie and the subject.
+The PIN or password is never stored: it is used for the `/initiate` call and dropped. It may be any non-empty string up to 128 characters (`@Size(min = 1, max = 128)` on `InitiateAuthRequest.pin` and `ReconnectRequest.pin`, matching the sidecar); the request records mask it in `toString()`.
+
+The phone number is kept, inside the encrypted session state only (not in `encrypted_credentials`, no migration): the state is `{refresh, device, sub, phone}`, with `phone` normalised to `+33…` by the sidecar. A state stored before this change has no `phone`, so it has to be re-entered once.
+
+#### One-field reconnect
+
+`GET /api/tr/status` adds `maskedPhone`: the country prefix and the last two digits, for example `+33 * ** ** ** 99`; `null` when there is no session or its state has no phone. The phone is decrypted per call, parsed with Jackson, never logged, and bad JSON gives `null`.
+
+`POST /api/tr/auth/reconnect {pin}` reads the phone from the member's stored session (active or deactivated, since an expired session keeps its row) and calls the same initiate path. It returns the same `{processId, flow, countdownInSeconds}` and shares the per-IP `trAuthBuckets` limit with `/auth/initiate`. With no stored phone it answers **409** with `code: INVALID_SESSION_STATE`, so the frontend falls back to the full phone + PIN form. Completion stays `POST /api/tr/auth/complete`, which stores the new state and queues the sync. `DELETE /api/tr/session` removes the row, and the phone with it.
 
 Failures keep the code the sidecar declared, restricted to `SidecarBank.TRADE_REPUBLIC`'s list: `INVALID_CREDENTIALS`, `INVALID_OTP`, `APP_VALIDATION_TIMEOUT`, `APP_VALIDATION_CANCELLED`, `AUTH_ATTEMPT_EXPIRED`, `SESSION_EXPIRED`, `INVALID_SESSION_STATE`, `RATE_LIMITED`, `UPSTREAM_FORMAT_CHANGED`, `INVALID_DATA`, `UPSTREAM_UNAVAILABLE`, `INTERNAL_ERROR`. A code outside the list, and a timeout, become `UPSTREAM_UNAVAILABLE`. A bare 401 means `INVALID_CREDENTIALS` on `/initiate`, `INVALID_OTP` on `/complete` and `SESSION_EXPIRED` on `/session`; a bare 410 means `AUTH_ATTEMPT_EXPIRED`.
 
@@ -42,11 +51,11 @@ Sessions live in the shared `sidecar_session` table (bank `TRADE_REPUBLIC`), lik
 `TradeRepublicSyncService` builds a `SidecarSyncTemplate` with a `Strategy`:
 
 - `completeAuth()` calls `/complete`, then `insertQueued` stores the encrypted `sessionState` (AES-256-GCM through `CryptoEncryption`, see [encryption-at-rest.md](./encryption-at-rest.md)), lifts the soft-delete tombstones on the member's TR accounts in the same transaction, and queues the first import on the `tradeRepublicSyncExecutor` single-worker executor. It returns a `SessionStatusResponse` straight away. A Disconnect clicked during the in-app wait bumps a per-member generation, so the login that finishes afterwards stores nothing and answers `AUTH_ATTEMPT_EXPIRED` (the fence CIC and CMES use).
-- A job runs in three short transactions fenced on the session row. `fetch` calls `/session`, reads the portfolio over the WebSocket and resolves every ISIN to its ticker through OpenFIGI, outside any transaction. `commit` runs `upsertAccount` for each account inside the job's transaction, with no network call while it holds the session row lock.
+- A job runs in three short transactions fenced on the session row. `fetch` calls `/session`, reads the portfolio over the WebSocket and resolves every ISIN to its ticker through OpenFIGI, then fetches the CSV export through `/transactions`, all outside any transaction. `commit` runs `upsertAccount` for each account inside the job's transaction, with no network call while it holds the session row lock. `afterCommit` imports the export's transactions in a transaction of its own.
 - `SESSION_EXPIRED` and `INVALID_SESSION_STATE` end the session: it is kept but inactive, the member sees "reconnect". Any other failure (`UPSTREAM_UNAVAILABLE`, `RATE_LIMITED`...) leaves it active so the next sync retries.
 - A backend restart turns `QUEUED`/`RUNNING` rows into a retryable failure: `TradeRepublicSyncService` is one of the services `SidecarSyncRecovery` runs at boot.
 
-`POST /api/tr/sync` queues an import and returns the status (throttled per client IP by the shared `syncBuckets`, 10 a minute, like the other sync entry points); `GET /api/tr/status` and `DELETE /api/tr/session` read and delete the row. All of them answer `{isActive, syncStatus, lastSyncStartedAt, lastSyncCompletedAt, lastSyncError}`, except the delete (204) and the two auth steps.
+`POST /api/tr/sync` queues an import and returns the status (throttled per client IP by the shared `syncBuckets`, 10 a minute, like the other sync entry points); `GET /api/tr/status` and `DELETE /api/tr/session` read and delete the row. All of them answer `{isActive, syncStatus, lastSyncStartedAt, lastSyncCompletedAt, lastSyncError, maskedPhone}`, except the delete (204) and the two auth steps.
 
 ### Data fetching (WebSocket, no sidecar)
 
@@ -126,11 +135,24 @@ The two legs are strict mirrors: the investment leg always carries the **opposit
 
 **Balance ownership**: the TR Cash balance stays owned by the sync — the import writes ledger rows but never overwrites `currentBalance`. More generally, `ManualTransactionService` now recomputes a cash account's balance/history from its transactions **only for manual accounts** (`refreshManualCashBalance`). For a synced account the balance and snapshots come from the connector; recomputing them from this (deliberately partial — `TRANSFER_IN/OUT` excluded) ledger would corrupt the balance the next time a manual transaction is added.
 
-**Endpoint**: `POST /api/tr/accounts/{id}/transactions/import-csv` (multipart `file` param). The `{id}` is validated to belong to the authenticated member. Returns `{ inserted: N, skipped: M }`.
+**Endpoint**: `POST /api/tr/accounts/{id}/transactions/import-csv` (multipart `file` param). The `{id}` is validated to belong to the authenticated member. Returns `{ inserted: N, skipped: M, nonEur: K }`, `nonEur` counting the rows left out because their `currency` is not EUR (see below).
 
 **Frontend**: on the **TR Cash** (CHECKING) account detail page, the **"+ Ajouter CSV (TR)"** button appears next to the manual-transaction button. After upload, a sonner toast shows the count of inserted rows and, if some were already present, the skip count.
 
+### Automatic transaction import
+
+Each sync also imports the transactions, with no upload. After the accounts are fetched, `TradeRepublicAdapter.fetchTransactionsCsv()` calls the sidecar's `POST /transactions` (`sessionState`, `from`, `to`; 120 s timeout) and gets Trade Republic's own CSV export back. The body goes through the same parser as the manual import (`importTransactions(Reader, memberId)`), so both paths write identical `<transaction_id>_cash` / `_inv` external IDs and never duplicate each other's rows.
+
+- **Window**: `to` is today (Europe/Paris). `from` is the newest imported TR Cash entry minus 14 days, or today minus 3 years on a first import. The session's `lastSyncCompletedAt` is not used: queueing and starting a run both clear it. The 14-day overlap is harmless because rows already present are skipped. `from` is never older than today minus 1830 days, the longest window the sidecar accepts: a newest entry over five years old would otherwise ask for a window refused with `INVALID_DATA` on every sync.
+- **Size**: the export is read whole into memory. The adapter's WebClient raises Spring's 256 KiB default codec limit to 16 MiB (as Caisse d'Epargne does). A real 3-year, 721-row export was 155 KB, so the default dropped any export past about 1,200 rows.
+- **Currency**: every stored amount is EUR. A row whose `currency` column (found by its header name) is set to anything other than EUR is left out and counted (`nonEur`), on the manual upload too. A header without a `currency` column logs a WARN and reads every amount as EUR, as before. `original_currency` is not checked: on a card payment abroad it names the charged currency while `amount` stays the EUR debit.
+- **Order**: the export is fetched in `Strategy.fetch()`, outside any transaction. `commit()` upserts the accounts only. The import runs in `afterCommit()`, in its own transaction, so a row that cannot be written rolls back the transactions alone and leaves the synced balances and holdings in place.
+- **Failure policy**: any sidecar failure on the export other than `SESSION_EXPIRED` is logged by code or exception type and the sync still ends `SUCCESS` without transactions. `SESSION_EXPIRED` fails the sync like the account fetch. Neither the CSV nor its rows are logged.
+- **Log line**: the completion line reports `transactions=fetched` when an export was received; the import itself logs `tx=<inserted>`, `skipped=<n>` and `nonEur=<n>`.
+
 ### Scheduled sync
+
+The daily and MCP syncs never start a login: an expired session stays `SESSION_EXPIRED` until the member reconnects with `/auth/reconnect` or `/auth/initiate`.
 
 `MemberSyncService` calls `TradeRepublicSyncService.resyncReporting()` for the daily run. It goes through `SidecarSyncTemplate.resyncReporting`: no session reports "not connected", an inactive or expired one reports "needs re-authentication", otherwise an import is queued. The daily run needs no refresh step of its own: every job opens a fresh cookie through `/session`.
 
@@ -163,7 +185,9 @@ TRController.completeAuth() --> TRSyncService.completeAuth()
         fetch:  sidecar POST /session --> sessionToken + claims
                 WebSocket (Cookie: tr_session): connect -> availableCash
                   -> compactPortfolioByType (per secAccNo) -> instrument -> ticker ISIN.<venue>
+                sidecar POST /transactions (sessionState, from, to) --> CSV export
         commit: upsert accounts + holdings (job transaction)
+        afterCommit: import the CSV's transactions (own transaction)
 
 MemberSyncService (daily) --> TRSyncService.resyncReporting() --> same job when the session is usable
 ```
@@ -211,14 +235,14 @@ Without rule 2, Playwright installs to `/root/.cache/ms-playwright/`, which the 
 - **Local Maven dev uses localhost**: `application-dev.yml` overrides `app.sidecars.tr-auth.url` to `http://127.0.0.1:8001` because `tr-auth` is a Docker-internal DNS name. When running the backend with `mvn spring-boot:run`, start the sidecar separately on port 8001.
 - **tr-auth 500 = Playwright crash**: A generic 500 from the sidecar almost always means the Chromium browser could not launch. Check `PLAYWRIGHT_BROWSERS_PATH` is `/opt/playwright-browsers` and readable by `trauth` (see Docker section above). Run `docker logs <tr-auth-container>` to confirm.
 - **Dockerfile changes need an explicit rebuild**: `docker compose up -d` does NOT rebuild existing images. After editing `services/tr-auth/Dockerfile`, run `docker compose build tr-auth && docker compose up -d tr-auth`. Symptom of a stale image: `docker compose ps` shows `tr-auth` with a SHA-only `IMAGE` column instead of a tagged name (`picsou-tr-auth` / `docker-tr-auth`), and the runtime error references a path that doesn't match the current Dockerfile (e.g. `/home/trauth/.cache/ms-playwright/` when the shared base sets `PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers`).
-- **`tan` is optional**: `CompleteAuthRequest.tan` is `null` for the `confirmInApp` flow and 4 digits for `otp`; the sidecar validates it.
+- **`tan` is optional**: `CompleteAuthRequest.tan` is absent or `null` for the `confirmInApp` flow, 4 digits for `otp` and 6 digits for `authenticator`; anything else is rejected with 422 before reaching the sidecar.
 - **Initiation errors are not TAN prompts**: a failed `/tr/auth/initiate` call
   has no reliable `processId`, so frontend screens must keep the user on the
   phone/PIN step and clear any stale process id. Only `/tr/auth/complete` errors
   should keep the verification-code step visible for retry.
 - **Frontend API field mapping**: Frontend sends `phoneNumber` and `pin` (not `phone` and `pin`). The API uses ISO field names; if frontend is updated, verify the DTO record field names match.
 - **Error codes reach the frontend as `SyncException` codes**: `SyncException` carries one of the `SidecarErrorCode` names above; `GlobalExceptionHandler` maps it to an error response and the shared `formatTrAuthError()` (`frontend/src/lib/errors.ts`) turns it into a message. It is used by `TradeRepublicTab`, `AddAccountModal` **and** `SyncAllModal`. A new code needs a `SidecarBank.TRADE_REPUBLIC` entry, the CHECK branch in a migration and a frontend message.
-- **WebSocket protocol is reverse-engineered**: The TR WebSocket API is undocumented. Raw responses are logged at INFO level. If TR changes the protocol, the adapter will break and need updating.
+- **WebSocket protocol is reverse-engineered**: The TR WebSocket API is undocumented. Each frame is logged at INFO as its subscription id, type and size only: a payload carries the member's account numbers, balances and positions. Raw frames are logged at TRACE, off by default; set `logging.level.com.picsou.adapter.TradeRepublicAdapter=TRACE` to diagnose a protocol change, and treat that log as account data. If TR changes the protocol, the adapter will break and need updating.
 - **timeout-driven completion**: The WebSocket session completes when either all data is received (cash + all portfolios + all tickers) or 30 seconds have elapsed in total (`untilAnsweredOrCapped`). The bound is on elapsed time, not on the gap between two frames: answered tickers keep streaming deltas, so a gap timeout never fires while one position is ticking, and a single subscription TR never answers (a delisted share, a contingent value right) used to hold the read open until the 45s hard timeout failed the whole sync with nothing stored. The silent position falls back to `averageBuyIn`. An error on the stream (socket drop, a frame that fails to process) also ends the read and keeps the frames received so far, logged at WARN with the error type only.
 - **TR WebSocket API breaks without notice**: Trade Republic removed `compactPortfolio` on 2026-06-21 (protocol v31) and replaced it with `compactPortfolioByType`. The JSON structure changed: positions are now nested under `categories[].positions[]` and use `isin` instead of `instrumentId`. Reference project for future breaks: [pytr-org/pytr](https://github.com/pytr-org/pytr) — they track TR API changes in commit history.
 - **`compactPortfolioByType` requires `secAccNo`**: Unlike the old `compactPortfolio` which had a generic no-secAccNo fallback, `compactPortfolioByType` is always per-securities-account. If `secAccNos` is empty (no securities sub-account in the claims), the portfolio subscription is skipped entirely — only cash is returned.

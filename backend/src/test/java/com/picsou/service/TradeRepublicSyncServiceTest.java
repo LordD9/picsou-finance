@@ -44,10 +44,15 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -274,6 +279,79 @@ class TradeRepublicSyncServiceTest {
 
         assertThat(status.isActive()).isFalse();
         assertThat(status.syncStatus()).isEqualTo(SidecarSyncStatus.IDLE);
+    }
+
+    // --- Stored phone: masked in the status, read back for the one-field reconnect ---
+
+    private static final String STATE_WITH_PHONE =
+        "{\"refresh\":\"r\",\"device\":\"d\",\"sub\":\"s\",\"phone\":\"+33612345699\"}";
+
+    @Test
+    void getStatus_masksTheStoredPhoneKeepingThePrefixAndTheLastTwoDigits() {
+        FamilyMember member = FamilyMember.builder().id(7L).displayName("Owner").build();
+        arrangeSession(member);
+        when(encryption.decrypt("encrypted")).thenReturn(STATE_WITH_PHONE);
+
+        var status = service.getStatus(7L);
+
+        assertThat(status.maskedPhone()).isEqualTo("+33 * ** ** ** 99");
+        assertThat(status.maskedPhone()).doesNotContain("1234");
+    }
+
+    @Test
+    void getStatus_hasNoMaskedPhoneForAStateStoredBeforeThePhoneWasKept() {
+        FamilyMember member = FamilyMember.builder().id(7L).displayName("Owner").build();
+        arrangeSession(member);
+        when(encryption.decrypt("encrypted")).thenReturn("{\"refresh\":\"r\",\"device\":\"d\",\"sub\":\"s\"}");
+
+        assertThat(service.getStatus(7L).maskedPhone()).isNull();
+        assertThat(service.storedPhone(7L)).isEmpty();
+    }
+
+    @Test
+    void getStatus_toleratesAStateThatIsNotJsonOrCannotBeDecrypted() {
+        FamilyMember member = FamilyMember.builder().id(7L).displayName("Owner").build();
+        arrangeSession(member);
+        when(encryption.decrypt("encrypted")).thenReturn("not json {");
+        assertThat(service.getStatus(7L).maskedPhone()).isNull();
+
+        when(encryption.decrypt("encrypted")).thenThrow(new IllegalStateException("bad tag"));
+        var status = service.getStatus(7L);
+        assertThat(status.isActive()).isTrue();
+        assertThat(status.maskedPhone()).isNull();
+    }
+
+    @Test
+    void maskPhone_neverRevealsMoreThanTheLastTwoDigits() {
+        assertThat(TradeRepublicSyncService.maskPhone("+4915112345678").replaceAll("[^0-9]", "")).isEqualTo("4978");
+        assertThat(TradeRepublicSyncService.maskPhone("0612345699")).isNull();
+        assertThat(TradeRepublicSyncService.maskPhone(null)).isNull();
+    }
+
+    @Test
+    void maskPhone_ignoresSeparatorsLeftInAnOlderStoredState() {
+        assertThat(TradeRepublicSyncService.maskPhone("+33 6 12 34 56 99")).isEqualTo("+33 * ** ** ** 99");
+        assertThat(TradeRepublicSyncService.maskPhone("+33-6-12-34-56-99")).isEqualTo("+33 * ** ** ** 99");
+    }
+
+    @Test
+    void storedPhone_isReadFromADeactivatedSessionToo() {
+        FamilyMember member = FamilyMember.builder().id(7L).displayName("Owner").build();
+        SidecarSession session = arrangeSession(member);
+        session.markQueued();
+        session.markFailed(SidecarErrorCode.SESSION_EXPIRED, java.time.Instant.now());
+        when(encryption.decrypt("encrypted")).thenReturn(STATE_WITH_PHONE);
+
+        assertThat(session.isActive()).isFalse();
+        assertThat(service.storedPhone(7L)).contains("+33612345699");
+        assertThat(service.getStatus(7L).maskedPhone()).isEqualTo("+33 * ** ** ** 99");
+    }
+
+    @Test
+    void storedPhone_isEmptyWithoutASession() {
+        when(sessionRepository.findByBankAndMemberId(SidecarBank.TRADE_REPUBLIC, 7L)).thenReturn(Optional.empty());
+
+        assertThat(service.storedPhone(7L)).isEmpty();
     }
 
     /**
@@ -845,6 +923,201 @@ class TradeRepublicSyncServiceTest {
             .extracting(ex -> ((SyncException) ex).getCode())
             .isEqualTo("INVALID_SESSION_STATE");
         verify(trPort, never()).openSession(anyString());
+    }
+
+    // --- Automatic transaction import during the sync ---
+
+    private static final LocalDate TODAY = LocalDate.now(ZoneId.of("Europe/Paris"));
+
+    private static String csvText(String... dataRows) {
+        return "datetime" + ",".repeat(18) + "\n" + String.join("\n", dataRows) + "\n";
+    }
+
+    private FamilyMember syncMember() {
+        FamilyMember member = FamilyMember.builder().id(MEMBER).displayName("Owner").build();
+        arrangeSession(member);
+        return member;
+    }
+
+    @Test
+    void sync_aFirstImportAsksForThreeYearsOfTransactions() {
+        syncMember();
+        when(trPort.fetchAccounts("cookie", CLAIMS)).thenReturn(List.of());
+        when(trPort.fetchTransactionsCsv(anyString(), any(), any())).thenReturn(csvText());
+
+        service.queueSync(MEMBER);
+
+        verify(trPort).fetchTransactionsCsv("plain-state", TODAY.minusYears(3), TODAY);
+    }
+
+    @Test
+    void sync_aLaterImportRereadsTheLastTwoWeeksBeforeTheNewestImportedEntry() {
+        syncMember();
+        Account cash = trCash();
+        when(trPort.fetchAccounts("cookie", CLAIMS)).thenReturn(List.of());
+        when(accountRepository.findAllByMemberIdOrderByCreatedAtAsc(MEMBER)).thenReturn(List.of(cash));
+        when(transactionRepository.findLatestSyncedDateByAccountId(1L)).thenReturn(TODAY.minusDays(7));
+        when(trPort.fetchTransactionsCsv(anyString(), any(), any())).thenReturn(csvText());
+
+        service.queueSync(MEMBER);
+
+        verify(trPort).fetchTransactionsCsv("plain-state", TODAY.minusDays(21), TODAY);
+    }
+
+    @Test
+    void sync_aNewestEntryOlderThanFiveYearsAsksForTheLongestWindowTheSidecarAccepts() {
+        syncMember();
+        Account cash = trCash();
+        when(trPort.fetchAccounts("cookie", CLAIMS)).thenReturn(List.of());
+        when(accountRepository.findAllByMemberIdOrderByCreatedAtAsc(MEMBER)).thenReturn(List.of(cash));
+        when(transactionRepository.findLatestSyncedDateByAccountId(1L)).thenReturn(TODAY.minusYears(6));
+        when(trPort.fetchTransactionsCsv(anyString(), any(), any())).thenReturn(csvText());
+
+        service.queueSync(MEMBER);
+
+        verify(trPort).fetchTransactionsCsv("plain-state", TODAY.minusDays(1830), TODAY);
+    }
+
+    @Test
+    void importTransactions_leavesOutAndCountsRowsTheExportStatesInAnotherCurrency() {
+        Account cash = trCash();
+        stubTrAccounts(cash);
+        when(categorizationService.categoriesBySlug(MEMBER)).thenReturn(Map.of("investissement", investTransferCategory()));
+        // The importer finds both columns by their header name; these indices are free slots.
+        String[] header = new String[19];
+        Arrays.fill(header, "");
+        header[0] = "datetime";
+        header[12] = "currency";
+        header[14] = "original_currency";
+        String eur = row("2026-10-02", "DEFAULT", "CASH", "CARD_PAYMENT", "", "-12.50", "Coffee", "ext-eur");
+        String usd = row("2026-10-03", "DEFAULT", "CASH", "CARD_PAYMENT", "", "-20.00", "Diner", "ext-usd");
+        String abroad = row("2026-10-04", "DEFAULT", "CASH", "CARD_PAYMENT", "", "-9.10", "Taxi", "ext-abroad");
+        String blank = row("2026-10-05", "DEFAULT", "CASH", "INTEREST", "", "1.00", "Interest", "ext-blank");
+        String body = String.join(",", header).toUpperCase() + "\n"
+            + withColumn(eur, 12, "eur") + "\n"
+            + withColumn(usd, 12, "USD") + "\n"
+            + withColumn(withColumn(abroad, 12, "EUR"), 14, "USD") + "\n"
+            + blank + "\n";
+        var file = new MockMultipartFile("file", "tr.csv", "text/csv", body.getBytes(StandardCharsets.UTF_8));
+
+        TradeRepublicSyncService.ImportResult result = service.importTransactionsCsv(1L, file, MEMBER);
+
+        assertThat(result.inserted()).isEqualTo(3);
+        assertThat(result.nonEur()).isEqualTo(1);
+        ArgumentCaptor<Transaction> saved = ArgumentCaptor.forClass(Transaction.class);
+        verify(transactionRepository, times(3)).save(saved.capture());
+        assertThat(saved.getAllValues()).extracting(Transaction::getExternalId)
+            .containsExactlyInAnyOrder("ext-eur_cash", "ext-abroad_cash", "ext-blank_cash");
+    }
+
+    private static String withColumn(String row, int index, String value) {
+        List<String> cols = new ArrayList<>(Arrays.asList(row.split(",", -1)));
+        cols.set(index, value);
+        return String.join(",", cols);
+    }
+
+    @Test
+    void sync_importsTheExportIntoTrCashAndTheInvestmentAccount() {
+        SidecarSession session = arrangeSession(FamilyMember.builder().id(MEMBER).displayName("Owner").build());
+        Account cash = trCash();
+        Account pea = trPea();
+        when(trPort.fetchAccounts("cookie", CLAIMS)).thenReturn(List.of());
+        when(accountRepository.findAllByMemberIdOrderByCreatedAtAsc(MEMBER)).thenReturn(List.of(cash, pea));
+        when(categorizationService.categoriesBySlug(MEMBER))
+            .thenReturn(categoriesWithBoth(investTransferCategory(), investPurchaseCategory()));
+        when(trPort.fetchTransactionsCsv(anyString(), any(), any())).thenReturn(csvText(
+            row("2026-10-01", "PEA", "TRADING", "BUY", "S&P 500", "-59,31", "Buy", "ext-1"),
+            row("2026-10-02", "DEFAULT", "CASH", "CARD_PAYMENT", "", "-12.50", "Coffee", "ext-2")));
+
+        service.queueSync(MEMBER);
+
+        ArgumentCaptor<Transaction> saved = ArgumentCaptor.forClass(Transaction.class);
+        verify(transactionRepository, times(3)).save(saved.capture());
+        assertThat(saved.getAllValues()).extracting(Transaction::getExternalId)
+            .containsExactlyInAnyOrder("ext-1_cash", "ext-1_inv", "ext-2_cash");
+        assertThat(saved.getAllValues()).filteredOn(t -> t.getExternalId().endsWith("_inv"))
+            .singleElement().satisfies(t -> assertThat(t.getAccount()).isSameAs(pea));
+        assertThat(session.getSyncStatus()).isEqualTo(SidecarSyncStatus.SUCCESS);
+    }
+
+    @Test
+    void sync_aSecondIdenticalImportInsertsNothing() {
+        syncMember();
+        when(trPort.fetchAccounts("cookie", CLAIMS)).thenReturn(List.of());
+        when(accountRepository.findAllByMemberIdOrderByCreatedAtAsc(MEMBER)).thenReturn(List.of(trCash(), trPea()));
+        when(categorizationService.categoriesBySlug(MEMBER))
+            .thenReturn(categoriesWithBoth(investTransferCategory(), investPurchaseCategory()));
+        when(trPort.fetchTransactionsCsv(anyString(), any(), any())).thenReturn(csvText(
+            row("2026-10-01", "PEA", "TRADING", "BUY", "S&P 500", "-59,31", "Buy", "ext-1")));
+        Set<String> stored = new HashSet<>();
+        when(transactionRepository.save(any(Transaction.class))).thenAnswer(inv -> {
+            Transaction tx = inv.getArgument(0);
+            stored.add(tx.getAccount().getId() + ":" + tx.getExternalId());
+            return tx;
+        });
+        when(transactionRepository.existsByAccountIdAndExternalId(anyLong(), anyString()))
+            .thenAnswer(inv -> stored.contains(inv.getArgument(0) + ":" + inv.getArgument(1)));
+
+        service.queueSync(MEMBER);
+        service.queueSync(MEMBER);
+
+        verify(transactionRepository, times(2)).save(any(Transaction.class));
+        assertThat(stored).containsExactlyInAnyOrder("1:ext-1_cash", "2:ext-1_inv");
+    }
+
+    @Test
+    void sync_aFailedExportKeepsTheCommittedAccountsAndTheSyncSuccessful() {
+        SidecarSession session = arrangeSession(FamilyMember.builder().id(MEMBER).displayName("Owner").build());
+        stubOneSyncedAccount();
+        when(trPort.fetchTransactionsCsv(anyString(), any(), any()))
+            .thenThrow(new SyncException("down", null, "UPSTREAM_UNAVAILABLE"));
+
+        service.queueSync(MEMBER);
+
+        verify(accountRepository).save(any(Account.class));
+        verify(transactionRepository, never()).save(any(Transaction.class));
+        assertThat(session.getSyncStatus()).isEqualTo(SidecarSyncStatus.SUCCESS);
+    }
+
+    @Test
+    void sync_anExportTheImporterCannotWriteKeepsTheCommittedAccountsAndTheSyncSuccessful() {
+        SidecarSession session = arrangeSession(FamilyMember.builder().id(MEMBER).displayName("Owner").build());
+        stubOneSyncedAccount();
+        when(accountRepository.findAllByMemberIdOrderByCreatedAtAsc(MEMBER)).thenReturn(List.of(trCash()));
+        when(categorizationService.categoriesBySlug(MEMBER)).thenReturn(Map.of("investissement", investTransferCategory()));
+        when(trPort.fetchTransactionsCsv(anyString(), any(), any())).thenReturn(csvText(
+            row("2026-10-02", "DEFAULT", "CASH", "CARD_PAYMENT", "", "-12.50", "Coffee", "ext-2")));
+        when(transactionRepository.save(any(Transaction.class))).thenThrow(new IllegalStateException("boom"));
+
+        service.queueSync(MEMBER);
+
+        verify(accountRepository).save(any(Account.class));
+        assertThat(session.getSyncStatus()).isEqualTo(SidecarSyncStatus.SUCCESS);
+    }
+
+    @Test
+    void sync_anExpiredSessionOnTheExportStillFailsTheSync() {
+        SidecarSession session = arrangeSession(FamilyMember.builder().id(MEMBER).displayName("Owner").build());
+        when(trPort.fetchAccounts("cookie", CLAIMS)).thenReturn(List.of());
+        when(trPort.fetchTransactionsCsv(anyString(), any(), any()))
+            .thenThrow(new SyncException("expired", null, "SESSION_EXPIRED"));
+
+        service.queueSync(MEMBER);
+
+        assertThat(session.getSyncStatus()).isEqualTo(SidecarSyncStatus.FAILED);
+        assertThat(session.getLastSyncError()).isEqualTo(SidecarErrorCode.SESSION_EXPIRED);
+    }
+
+    private void stubOneSyncedAccount() {
+        TrAccountData data = new TrAccountData("tr_cto", "TR Titres", AccountType.COMPTE_TITRES, bd("0"), List.of());
+        when(trPort.fetchAccounts("cookie", CLAIMS)).thenReturn(List.of(data));
+        Account existing = Account.builder().id(42L).name("TR Titres").type(AccountType.COMPTE_TITRES)
+            .provider("Trade Republic").currency("EUR").currentBalance(bd("1000"))
+            .externalAccountId("tr_cto").isManual(false).build();
+        when(accountRepository.findByExternalAccountIdAndMemberId("tr_cto", MEMBER)).thenReturn(Optional.of(existing));
+        when(accountRepository.save(any(Account.class))).thenAnswer(inv -> inv.getArgument(0));
+        lenient().when(accountService.toResponse(any(Account.class)))
+            .thenAnswer(inv -> com.picsou.dto.AccountResponse.from(inv.getArgument(0), bd("0")));
     }
 
     private static BigDecimal bd(String v) { return new BigDecimal(v); }

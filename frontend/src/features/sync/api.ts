@@ -32,6 +32,12 @@ import type {
   LbpAuthKeypadResponse,
   LbpAuthCompleteResponse,
   LbpDeleteResponse,
+  BnpBrand,
+  BnpSessionStatus,
+  BnpAuthInitResponse,
+  BnpAuthKeypadResponse,
+  BnpAuthCompleteResponse,
+  BnpDeleteResponse,
   RevolutSessionStatus,
   SyncProgress,
   BourseDirectSessionStatus,
@@ -113,6 +119,10 @@ export const trApi = {
     api
       .post<TrAuthInitResponse>('/tr/auth/initiate', { phoneNumber, pin })
       .then(r => r.data),
+
+  /** Re-login with the phone stored in the session: only the PIN or password is sent. */
+  reconnectAuth: (pin: string) =>
+    api.post<TrAuthInitResponse>('/tr/auth/reconnect', { pin }).then(r => r.data),
 
   /**
    * With no `tan` the request stays open while the member confirms in the Trade Republic app
@@ -342,6 +352,45 @@ export const lbpApi = {
       .then(r => r.data),
 
   clearSession: () => api.delete<LbpDeleteResponse>('/lbp/session').then(r => r.data),
+}
+
+// --- BNP Paribas / Hello bank! ---
+
+export const bnpApi = {
+  // One attempt only: a wrong password spends a bank attempt. The customer number alone
+  // goes out; the password is clicked on the bank's shuffled keypad.
+  initiateAuth: (customerId: string, brand: BnpBrand) =>
+    api.post<BnpAuthInitResponse>('/bnp/auth/initiate', { customerId, brand }).then(r => r.data),
+
+  // Tile positions (0..9 in reading order), never digits. Single use.
+  sendKeypad: (processId: string, positions: number[]) =>
+    api.post<BnpAuthKeypadResponse>('/bnp/auth/keypad', { processId, positions }).then(r => r.data),
+
+  // Without a code the request stays open until the member approves in the bank's app (the
+  // backend waits up to 200 s); with one it submits the SMS code.
+  completeAuth: (processId: string, code?: string) =>
+    api
+      .post<BnpAuthCompleteResponse>(
+        '/bnp/auth/complete',
+        code === undefined ? { processId } : { processId, code },
+        { timeout: 210_000 },
+      )
+      .then(r => r.data),
+
+  sync: () => api.post<BnpSessionStatus>('/bnp/sync').then(r => r.data),
+
+  getStatus: () =>
+    api
+      .get<BnpSessionStatus>('/bnp/status', { skipGlobalErrorRedirect: true })
+      .then(r => r.data),
+
+  /** One status read that gives up after `timeoutMs`, outside the query cache. */
+  getStatusWithin: (timeoutMs: number) =>
+    api
+      .get<BnpSessionStatus>('/bnp/status', { skipGlobalErrorRedirect: true, timeout: timeoutMs })
+      .then(r => r.data),
+
+  clearSession: () => api.delete<BnpDeleteResponse>('/bnp/session').then(r => r.data),
 }
 
 // --- Revolut ---
@@ -666,7 +715,11 @@ export const finaryApi = {
   previewFile: (file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return api.post<FinaryPreviewResponse>('/finary/preview', form).then(r => r.data)
+    return api
+      .post<FinaryPreviewResponse>('/finary/preview', form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      .then(r => r.data)
   },
 
   previewApi: (totp?: string) =>

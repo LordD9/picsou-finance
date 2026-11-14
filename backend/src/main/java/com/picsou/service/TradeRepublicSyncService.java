@@ -1,5 +1,7 @@
 package com.picsou.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.picsou.adapter.OpenFigiIsinConverter;
 import com.picsou.adapter.OpenFigiIsinConverter.TickerResult;
 import com.picsou.config.CryptoEncryption;
@@ -42,12 +44,16 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.Reader;
+import java.io.StringReader;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -57,6 +63,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.regex.Pattern;
 
 import static com.picsou.service.SyncValues.requireTransactionResult;
 
@@ -65,6 +72,16 @@ public class TradeRepublicSyncService {
 
     private static final Logger log = LoggerFactory.getLogger(TradeRepublicSyncService.class);
     private static final String SOURCE = "trade-republic";
+    private static final ZoneId PARIS = ZoneId.of("Europe/Paris");
+    private static final int FIRST_IMPORT_YEARS = 3;
+    private static final int OVERLAP_DAYS = 14;
+    /** The longest window tr-auth's {@code /transactions} accepts ({@code EXPORT_MAX_DAYS} there). */
+    private static final int EXPORT_MAX_DAYS = 1830;
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Pattern INTERNATIONAL_PHONE = Pattern.compile("\\+\\d{6,15}");
+    private static final Pattern PHONE_SEPARATORS = Pattern.compile("[\\s.\\-()]");
+    private static final int COUNTRY_PREFIX_LENGTH = 3;
+    private static final int VISIBLE_PHONE_DIGITS = 2;
 
     private final TradeRepublicAdapter          trPort;
     private final AccountRepository             accountRepository;
@@ -76,6 +93,7 @@ public class TradeRepublicSyncService {
     private final SecurityIdentityService       identityService;
     private final CategorizationService         categorizationService;
     private final CategoryRepository            categoryRepository;
+    private final CryptoEncryption              encryption;
     private final SidecarSyncTemplate<Prepared> sync;
     private final TransactionTemplate           txTemplate;
     /** Bumped by every disconnect, so a login that was waiting meanwhile stores nothing. */
@@ -109,12 +127,16 @@ public class TradeRepublicSyncService {
         this.categorizationService = categorizationService;
         this.categoryRepository = categoryRepository;
         this.txTemplate        = txTemplate;
+        this.encryption        = encryption;
         this.sync = new SidecarSyncTemplate<>(SidecarBank.TRADE_REPUBLIC, new Strategy(), sessionRepository,
             familyMemberRepository, encryption, txTemplate, syncExecutor, false);
     }
 
-    /** The fetched accounts and their resolved tickers, so the commit makes no network call. */
-    private record Prepared(List<TrAccountData> accounts, Map<String, TickerResult> tickers) {}
+    /**
+     * What a sync fetched: the accounts, their resolved tickers (so the commit makes no network
+     * call), and TR's CSV export of the activity (null when it was not fetched).
+     */
+    private record Prepared(List<TrAccountData> accounts, Map<String, TickerResult> tickers, String csv) {}
 
     private final class Strategy implements SidecarSyncStrategy<Prepared> {
         @Override
@@ -128,7 +150,7 @@ public class TradeRepublicSyncService {
                     tickers.computeIfAbsent(p.isin(), isinConverter::resolve);
                 }
             }
-            return new Prepared(accounts, tickers);
+            return new Prepared(accounts, tickers, fetchTransactionsCsv(job));
         }
 
         @Override
@@ -136,21 +158,102 @@ public class TradeRepublicSyncService {
             prepared.accounts().forEach(data -> upsertAccount(data, job.memberId(), prepared.tickers()));
         }
 
+        /**
+         * Runs after the accounts are committed, in its own transaction: a row the importer cannot
+         * write rolls back the transactions only, never the balances and holdings just synced.
+         */
+        @Override
+        public void afterCommit(SidecarSyncJob job, Prepared prepared) {
+            if (prepared.csv() == null) {
+                return;
+            }
+            try {
+                ImportResult result = txTemplate.execute(status -> {
+                    try (Reader reader = new StringReader(prepared.csv())) {
+                        return importTransactions(reader, job.memberId());
+                    } catch (IOException ex) {
+                        throw new IllegalStateException(ex);
+                    }
+                });
+                if (result != null) {
+                    log.info("Trade Republic transactions imported (member={}; tx={}; skipped={}; nonEur={})",
+                        job.memberId(), result.inserted(), result.skipped(), result.nonEur());
+                }
+            } catch (RuntimeException ex) {
+                log.warn("Trade Republic transactions import failed (member={}; type={})",
+                    job.memberId(), ex.getClass().getSimpleName());
+            }
+        }
+
         @Override
         public String describe(Prepared prepared) {
-            return "accounts=" + prepared.accounts().size();
+            return "accounts=" + prepared.accounts().size()
+                + (prepared.csv() == null ? "" : "; transactions=fetched");
         }
+    }
+
+    /**
+     * The export covering the activity since the last import, or null when the sidecar cannot
+     * render it: the balances are worth syncing without the history. An expired session is the one
+     * failure that still fails the sync, as the same session just failed to open.
+     */
+    private String fetchTransactionsCsv(SidecarSyncJob job) {
+        LocalDate today = LocalDate.now(PARIS);
+        try {
+            return trPort.fetchTransactionsCsv(job.plainState(), transactionsWindowStart(job.memberId(), today), today);
+        } catch (SyncException ex) {
+            if (SidecarErrorCode.SESSION_EXPIRED.name().equals(ex.getCode())) {
+                throw ex;
+            }
+            log.warn("Trade Republic transactions export unavailable (member={}; code={})",
+                job.memberId(), ex.getCode());
+            return null;
+        } catch (RuntimeException ex) {
+            log.warn("Trade Republic transactions export unavailable (member={}; type={})",
+                job.memberId(), ex.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
+     * Newest imported TR Cash entry minus a safety overlap, or three years back for a first import.
+     * The session's own completion time cannot anchor this: queueing and starting a run clears it.
+     * Re-reading the overlap is safe, the importer skips rows it already holds.
+     */
+    private LocalDate transactionsWindowStart(Long memberId, LocalDate today) {
+        LocalDate latest = accountRepository.findAllByMemberIdOrderByCreatedAtAsc(memberId).stream()
+            .filter(a -> "Trade Republic".equals(a.getProvider()) && a.getType() == AccountType.CHECKING)
+            .findFirst()
+            .map(a -> transactionRepository.findLatestSyncedDateByAccountId(a.getId()))
+            .orElse(null);
+        LocalDate start = latest == null ? today.minusYears(FIRST_IMPORT_YEARS) : latest.minusDays(OVERLAP_DAYS);
+        // A newest entry over five years old would ask for a window the sidecar refuses with
+        // INVALID_DATA on every sync, so the export never comes back. Older activity is out of
+        // what one export returns; the manual upload still takes it.
+        LocalDate oldest = today.minusDays(EXPORT_MAX_DAYS);
+        return start.isBefore(oldest) ? oldest : start;
     }
 
     // --- Auth ---
 
     /**
-     * Step 1: sends phone+PIN to TR, which asks for the second factor (an in-app confirmation, or a
-     * 4-digit code on the fallback login). Credentials are used immediately and never stored.
+     * Step 1: sends phone+PIN (or password) to TR, which asks for the second factor (an in-app
+     * confirmation, a 4-digit code, or a 6-digit authenticator code). The PIN is used immediately
+     * and never stored.
      */
     public AuthInitResponse initiateAuth(String phoneNumber, String pin) {
         TrInitiate result = trPort.initiateAuth(phoneNumber, pin);
         return new AuthInitResponse(result.processId(), result.flow(), result.countdownInSeconds());
+    }
+
+    /**
+     * The phone number kept in the member's stored session state (active or deactivated), or empty
+     * when there is no session or it predates the stored phone. Lets the member reconnect with the
+     * PIN alone.
+     */
+    @Transactional(readOnly = true)
+    public Optional<String> storedPhone(Long memberId) {
+        return sync.find(memberId).map(this::phoneOf);
     }
 
     /**
@@ -263,7 +366,8 @@ public class TradeRepublicSyncService {
     /** Slug of the EXPENSE category under which imported securities purchases are booked. */
     private static final String INVESTMENT_PURCHASE_SLUG = "investissement-titres";
 
-    public record ImportResult(int inserted, int skipped) {}
+    /** {@code nonEur}: rows the export states in a currency other than EUR, left out. */
+    public record ImportResult(int inserted, int skipped, int nonEur) {}
 
     /**
      * Parses the full Trade Republic CSV export and creates double-entry transactions:
@@ -291,6 +395,19 @@ public class TradeRepublicSyncService {
         accountRepository.findByIdAndMemberId(accountId, memberId)
             .orElseThrow(() -> ResourceNotFoundException.account(accountId));
 
+        try (Reader reader = new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8)) {
+            return importTransactions(reader, memberId);
+        } catch (Exception ex) {
+            log.error("Failed to read TR Transactions CSV", ex);
+            throw new RuntimeException("Failed to read CSV file: " + ex.getMessage(), ex);
+        }
+    }
+
+    /**
+     * The parsing and insertion shared by the manual upload and the automatic sync. It owns no
+     * transaction (the callers do) and never closes the reader.
+     */
+    private ImportResult importTransactions(Reader source, Long memberId) throws IOException {
         List<Account> trAccounts = accountRepository.findAllByMemberIdOrderByCreatedAtAsc(memberId).stream()
             .filter(a -> "Trade Republic".equals(a.getProvider()))
             .toList();
@@ -301,7 +418,7 @@ public class TradeRepublicSyncService {
 
         if (trCash == null) {
             log.warn("TR CSV Import: No CHECKING account (TR Cash) found for member {}. Create TR accounts first by syncing or importing the accounts CSV.", memberId);
-            return new ImportResult(0, 0);
+            return new ImportResult(0, 0, 0);
         }
 
         // Investment leg → seeded "investissement" TRANSFER category: excluded from cashflow (so
@@ -316,161 +433,173 @@ public class TradeRepublicSyncService {
         // Resolved on the first TRADING row so a CASH-only import creates nothing.
         Category investmentPurchaseCategory = categoriesBySlug.get(INVESTMENT_PURCHASE_SLUG);
 
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
+        BufferedReader reader = new BufferedReader(source);
+        String line;
+        boolean firstLine = true;
+        int insertedCount = 0;
+        int skippedCount = 0;
+        int nonEurCount = 0;
+        int currencyColumn = -1;
 
-            String line;
-            boolean firstLine = true;
-            int insertedCount = 0;
-            int skippedCount = 0;
+        while ((line = reader.readLine()) != null) {
+            line = line.trim();
+            if (line.isEmpty()) continue;
 
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty()) continue;
-
-                if (firstLine) {
-                    firstLine = false;
-                    if (line.toLowerCase().contains("datetime") || line.toLowerCase().startsWith("\"datetime\"")) {
-                        continue;
+            if (firstLine) {
+                firstLine = false;
+                if (line.toLowerCase().contains("datetime") || line.toLowerCase().startsWith("\"datetime\"")) {
+                    currencyColumn = parseCsvLine(line.toLowerCase()).indexOf("currency");
+                    if (currencyColumn < 0) {
+                        log.warn("TR CSV import: no currency column in the header, amounts read as EUR");
                     }
-                }
-
-                List<String> parts = parseCsvLine(line);
-                if (parts.size() < 19) {
                     continue;
                 }
+            }
 
-                String dateStr = parts.get(1);
-                String accountTypeStr = parts.get(2);
-                String category = parts.get(3);
-                String type = parts.get(4);
-                String stockName = parts.get(6);
-                String amountStr = parts.get(10);
-                String description = parts.get(17);
-                String externalId = parts.get(18);
+            List<String> parts = parseCsvLine(line);
+            if (parts.size() < 19) {
+                continue;
+            }
 
-                // Skip rows with no external ID — they would all collide on "_cash"/"_inv"
-                if (externalId == null || externalId.isBlank()) {
-                    log.debug("TR CSV Import: skipping row with blank externalId (date={}, type={})", dateStr, type);
-                    continue;
+            String dateStr = parts.get(1);
+            String accountTypeStr = parts.get(2);
+            String category = parts.get(3);
+            String type = parts.get(4);
+            String stockName = parts.get(6);
+            String amountStr = parts.get(10);
+            String description = parts.get(17);
+            String externalId = parts.get(18);
+
+            // Skip rows with no external ID — they would all collide on "_cash"/"_inv"
+            if (externalId == null || externalId.isBlank()) {
+                log.debug("TR CSV Import: skipping row with blank externalId (date={}, type={})", dateStr, type);
+                continue;
+            }
+
+            if ("TRANSFER_IN".equalsIgnoreCase(type) || "TRANSFER_OUT".equalsIgnoreCase(type)) {
+                continue;
+            }
+
+            // Every amount is stored as EUR: a row the export states in another currency is left
+            // out rather than booked at the wrong value. original_currency is not checked: it names
+            // what a card payment abroad was charged in, while amount stays the EUR debit.
+            if (currencyColumn >= 0 && currencyColumn < parts.size()
+                    && !parts.get(currencyColumn).isBlank() && !"EUR".equalsIgnoreCase(parts.get(currencyColumn))) {
+                nonEurCount++;
+                continue;
+            }
+
+            // Handle FR-locale decimal comma (e.g. "59,31" → "59.31")
+            BigDecimal amount;
+            try {
+                amount = new BigDecimal(amountStr.replace(",", "."));
+            } catch (NumberFormatException e) {
+                log.debug("TR CSV Import: skipping row with unparseable amount '{}'", amountStr);
+                continue;
+            }
+
+            // Defensive date parsing: handle both yyyy-MM-dd and ISO timestamps (yyyy-MM-ddTHH:mm:ssZ)
+            LocalDate date;
+            try {
+                String datePart = dateStr.length() > 10 ? dateStr.substring(0, 10) : dateStr;
+                date = LocalDate.parse(datePart);
+            } catch (Exception e) {
+                log.debug("TR CSV Import: skipping row with unparseable date '{}'", dateStr);
+                continue;
+            }
+
+            // Build a readable description for the transaction
+            String finalDescription = (description != null && !description.isBlank()) ? description : type;
+            if ("BUY".equalsIgnoreCase(type) || "SELL".equalsIgnoreCase(type)) {
+                // e.g. "BUY S&P 500 EUR (Acc)" or "SELL Dell Technologies"
+                finalDescription = type + (stockName != null && !stockName.isBlank() ? " " + stockName : "");
+            }
+
+            boolean isTrading = "TRADING".equalsIgnoreCase(category);
+
+            // --- Cash leg (always created, except TRANSFER_IN/OUT already filtered above) ---
+            // Dedup is scoped by account to ensure member isolation.
+            boolean cashSkipped = false;
+            if (!transactionRepository.existsByAccountIdAndExternalId(trCash.getId(), externalId + "_cash")) {
+                // DEPOSIT for positive amounts (Saveback, interest, incoming transfers)
+                // WITHDRAWAL for negative amounts (card payments, investment debits)
+                TransactionType txTypeCash = amount.compareTo(BigDecimal.ZERO) < 0
+                    ? TransactionType.WITHDRAWAL
+                    : TransactionType.DEPOSIT;
+                // A securities purchase is a real outflow (an "investment purchase"): the cash
+                // leg of a TRADING row is booked under the "Investissement" EXPENSE category so
+                // it counts as spending (a sale, being positive, as an inflow). Non-TRADING
+                // CASH rows stay uncategorized and count by sign. Only the investment leg below
+                // is a TRANSFER, which keeps the movement from being counted twice (as income).
+                if (isTrading && investmentPurchaseCategory == null) {
+                    investmentPurchaseCategory = ensureInvestmentPurchaseCategory(memberId);
                 }
+                Transaction txCash = Transaction.builder()
+                    .account(trCash)
+                    .date(date)
+                    .amount(amount)
+                    .description(finalDescription)
+                    .merchantLabel(finalDescription)
+                    .type(type)
+                    .category(category)
+                    .categoryRef(isTrading ? investmentPurchaseCategory : null)
+                    .txType(txTypeCash)
+                    .externalId(externalId + "_cash")
+                    .nativeCurrency("EUR")
+                    .build();
+                transactionRepository.save(txCash);
+                insertedCount++;
+            } else {
+                cashSkipped = true;
+            }
 
-                if ("TRANSFER_IN".equalsIgnoreCase(type) || "TRANSFER_OUT".equalsIgnoreCase(type)) {
-                    continue;
-                }
+            // --- Investment leg (only for TRADING rows, opposite sign on the target account) ---
+            if (isTrading) {
+                Account targetInvestmentAccount = "PEA".equalsIgnoreCase(accountTypeStr) ? trPea : trTitres;
 
-                // Handle FR-locale decimal comma (e.g. "59,31" → "59.31")
-                BigDecimal amount;
-                try {
-                    amount = new BigDecimal(amountStr.replace(",", "."));
-                } catch (NumberFormatException e) {
-                    log.debug("TR CSV Import: skipping row with unparseable amount '{}'", amountStr);
-                    continue;
-                }
-
-                // Defensive date parsing: handle both yyyy-MM-dd and ISO timestamps (yyyy-MM-ddTHH:mm:ssZ)
-                LocalDate date;
-                try {
-                    String datePart = dateStr.length() > 10 ? dateStr.substring(0, 10) : dateStr;
-                    date = LocalDate.parse(datePart);
-                } catch (Exception e) {
-                    log.debug("TR CSV Import: skipping row with unparseable date '{}'", dateStr);
-                    continue;
-                }
-                
-                // Build a readable description for the transaction
-                String finalDescription = (description != null && !description.isBlank()) ? description : type;
-                if ("BUY".equalsIgnoreCase(type) || "SELL".equalsIgnoreCase(type)) {
-                    // e.g. "BUY S&P 500 EUR (Acc)" or "SELL Dell Technologies"
-                    finalDescription = type + (stockName != null && !stockName.isBlank() ? " " + stockName : "");
-                }
-
-                boolean isTrading = "TRADING".equalsIgnoreCase(category);
-
-                // --- Cash leg (always created, except TRANSFER_IN/OUT already filtered above) ---
-                // Dedup is scoped by account to ensure member isolation.
-                boolean cashSkipped = false;
-                if (!transactionRepository.existsByAccountIdAndExternalId(trCash.getId(), externalId + "_cash")) {
-                    // DEPOSIT for positive amounts (Saveback, interest, incoming transfers)
-                    // WITHDRAWAL for negative amounts (card payments, investment debits)
-                    TransactionType txTypeCash = amount.compareTo(BigDecimal.ZERO) < 0
-                        ? TransactionType.WITHDRAWAL
-                        : TransactionType.DEPOSIT;
-                    // A securities purchase is a real outflow (an "investment purchase"): the cash
-                    // leg of a TRADING row is booked under the "Investissement" EXPENSE category so
-                    // it counts as spending (a sale, being positive, as an inflow). Non-TRADING
-                    // CASH rows stay uncategorized and count by sign. Only the investment leg below
-                    // is a TRANSFER, which keeps the movement from being counted twice (as income).
-                    if (isTrading && investmentPurchaseCategory == null) {
-                        investmentPurchaseCategory = ensureInvestmentPurchaseCategory(memberId);
-                    }
-                    Transaction txCash = Transaction.builder()
-                        .account(trCash)
-                        .date(date)
-                        .amount(amount)
-                        .description(finalDescription)
-                        .merchantLabel(finalDescription)
-                        .type(type)
-                        .category(category)
-                        .categoryRef(isTrading ? investmentPurchaseCategory : null)
-                        .txType(txTypeCash)
-                        .externalId(externalId + "_cash")
-                        .nativeCurrency("EUR")
-                        .build();
-                    transactionRepository.save(txCash);
-                    insertedCount++;
-                } else {
-                    cashSkipped = true;
-                }
-
-                // --- Investment leg (only for TRADING rows, opposite sign on the target account) ---
-                if (isTrading) {
-                    Account targetInvestmentAccount = "PEA".equalsIgnoreCase(accountTypeStr) ? trPea : trTitres;
-
-                    if (targetInvestmentAccount != null) {
-                        if (!transactionRepository.existsByAccountIdAndExternalId(targetInvestmentAccount.getId(), externalId + "_inv")) {
-                            // Double-entry: the investment leg is the mirror of the cash leg, so it
-                            // carries the opposite sign. BUY (cash −) → money enters investments:
-                            // DEPOSIT +amount. SELL (cash +) → money leaves investments: WITHDRAWAL
-                            // −amount. The positive DEPOSIT is what AllocationService reads as an
-                            // investment contribution.
-                            BigDecimal investAmount = amount.negate();
-                            TransactionType txTypeInv = investAmount.signum() >= 0
-                                ? TransactionType.DEPOSIT
-                                : TransactionType.WITHDRAWAL;
-                            Transaction txInv = Transaction.builder()
-                                .account(targetInvestmentAccount)
-                                .date(date)
-                                .amount(investAmount)
-                                .description(finalDescription)
-                                .merchantLabel(finalDescription)
-                                .type(type)
-                                .category(category)
-                                .categoryRef(investmentTransferCategory)
-                                .txType(txTypeInv)
-                                .externalId(externalId + "_inv")
-                                .nativeCurrency("EUR")
-                                .build();
-                            transactionRepository.save(txInv);
-                            insertedCount++;
-                        } else if (cashSkipped) {
-                            // Both legs already exist → count as fully skipped
-                            skippedCount++;
-                        }
+                if (targetInvestmentAccount != null) {
+                    if (!transactionRepository.existsByAccountIdAndExternalId(targetInvestmentAccount.getId(), externalId + "_inv")) {
+                        // Double-entry: the investment leg is the mirror of the cash leg, so it
+                        // carries the opposite sign. BUY (cash −) → money enters investments:
+                        // DEPOSIT +amount. SELL (cash +) → money leaves investments: WITHDRAWAL
+                        // −amount. The positive DEPOSIT is what AllocationService reads as an
+                        // investment contribution.
+                        BigDecimal investAmount = amount.negate();
+                        TransactionType txTypeInv = investAmount.signum() >= 0
+                            ? TransactionType.DEPOSIT
+                            : TransactionType.WITHDRAWAL;
+                        Transaction txInv = Transaction.builder()
+                            .account(targetInvestmentAccount)
+                            .date(date)
+                            .amount(investAmount)
+                            .description(finalDescription)
+                            .merchantLabel(finalDescription)
+                            .type(type)
+                            .category(category)
+                            .categoryRef(investmentTransferCategory)
+                            .txType(txTypeInv)
+                            .externalId(externalId + "_inv")
+                            .nativeCurrency("EUR")
+                            .build();
+                        transactionRepository.save(txInv);
+                        insertedCount++;
                     } else if (cashSkipped) {
-                        // No investment account found and cash was also skipped → row fully skipped
+                        // Both legs already exist → count as fully skipped
                         skippedCount++;
                     }
                 } else if (cashSkipped) {
+                    // No investment account found and cash was also skipped → row fully skipped
                     skippedCount++;
                 }
+            } else if (cashSkipped) {
+                skippedCount++;
             }
-            log.info("TR CSV import complete: {} inserted, {} skipped (already present)", insertedCount, skippedCount);
-            return new ImportResult(insertedCount, skippedCount);
-        } catch (Exception ex) {
-            log.error("Failed to read TR Transactions CSV", ex);
-            throw new RuntimeException("Failed to read CSV file: " + ex.getMessage(), ex);
         }
+        if (nonEurCount > 0) {
+            log.warn("TR CSV import: {} rows not in EUR left out", nonEurCount);
+        }
+        log.info("TR CSV import complete: {} inserted, {} skipped (already present)", insertedCount, skippedCount);
+        return new ImportResult(insertedCount, skippedCount, nonEurCount);
     }
 
     /**
@@ -562,8 +691,51 @@ public class TradeRepublicSyncService {
             session.getSyncStatus(),
             session.getLastSyncStartedAt(),
             session.getLastSyncCompletedAt(),
-            session.getLastSyncError()
+            session.getLastSyncError(),
+            maskPhone(phoneOf(session))
         );
+    }
+
+    /** The phone in the session's decrypted state, null when absent, unreadable or not JSON. Never logged. */
+    private String phoneOf(SidecarSession session) {
+        try {
+            String plain = encryption.decrypt(session.getSessionState());
+            if (plain == null) {
+                return null;
+            }
+            JsonNode phone = JSON.readTree(plain).get("phone");
+            return phone != null && phone.isTextual() && !phone.asText().isBlank() ? phone.asText().trim() : null;
+        } catch (RuntimeException | java.io.IOException ex) {
+            return null;
+        }
+    }
+
+    /**
+     * Keeps the country prefix and the last two digits: {@code +33612345699} becomes
+     * {@code +33 * ** ** ** 99}. Separators are ignored, since a state stored before the sidecar
+     * dropped them can hold {@code +33 6 12 ...}. Null for anything that is not an international number.
+     */
+    static String maskPhone(String phone) {
+        phone = phone == null ? null : PHONE_SEPARATORS.matcher(phone).replaceAll("");
+        if (phone == null || !INTERNATIONAL_PHONE.matcher(phone).matches()) {
+            return null;
+        }
+        String national = phone.substring(COUNTRY_PREFIX_LENGTH);
+        if (national.length() <= VISIBLE_PHONE_DIGITS) {
+            return null;
+        }
+        String hidden = "*".repeat(national.length() - VISIBLE_PHONE_DIGITS);
+        String masked = hidden + national.substring(national.length() - VISIBLE_PHONE_DIGITS);
+        StringBuilder grouped = new StringBuilder();
+        int head = masked.length() % 2;
+        grouped.append(masked, 0, head);
+        for (int i = head; i < masked.length(); i += 2) {
+            if (grouped.length() > 0) {
+                grouped.append(' ');
+            }
+            grouped.append(masked, i, i + 2);
+        }
+        return phone.substring(0, COUNTRY_PREFIX_LENGTH) + " " + grouped;
     }
 
     // --- Private ---
@@ -728,10 +900,11 @@ public class TradeRepublicSyncService {
         SidecarSyncStatus syncStatus,
         Instant lastSyncStartedAt,
         Instant lastSyncCompletedAt,
-        SidecarErrorCode lastSyncError
+        SidecarErrorCode lastSyncError,
+        String maskedPhone
     ) implements SidecarSessionView {
         static SessionStatusResponse inactive() {
-            return new SessionStatusResponse(false, SidecarSyncStatus.IDLE, null, null, null);
+            return new SessionStatusResponse(false, SidecarSyncStatus.IDLE, null, null, null, null);
         }
     }
 }

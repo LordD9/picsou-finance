@@ -9,13 +9,20 @@ Flow:
   POST /initiate {phoneNumber, pin}   → {processId, flow, countdownInSeconds}
   POST /complete {processId, tan?}    → {sessionState}
   POST /session  {sessionState}       → {sessionToken, claims}
+  POST /transactions {sessionState, from, to} → TR's official CSV transaction export
+
+`pin` is the member's secret: the 4-digit PIN or, when the account uses one, a
+real password. TR takes both in the same field.
 
 flow "confirmInApp": v2 login, the member confirms in the Trade Republic app and
-/complete polls until TR confirms. flow "otp": v1 login with a 4-digit code, the
-fallback when v2 answers 5xx or DEVICE_NOT_FOUND.
+/complete polls until TR confirms. flow "authenticator": v2 login where TR asks
+for the code of the member's TOTP app (requiredAction AUTHENTICATOR_VERIFICATION);
+/complete posts the 6-digit code in tan. flow "otp": v1 login with a 4-digit
+code, the fallback when v2 answers 5xx or DEVICE_NOT_FOUND.
 
-sessionState is the JSON {"refresh": tr_refresh, "device": tr_device, "sub": sub}.
-It never carries tr_session. Cookie values, the PIN, claims contents and the
+sessionState is the JSON {"refresh": tr_refresh, "device": tr_device, "sub": sub,
+"phone": normalised phone}; states without phone are still accepted. It never
+carries tr_session. Cookie values, the PIN or password, claims contents and the
 full phone number are never logged.
 """
 
@@ -27,13 +34,13 @@ import re
 import secrets
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 import httpx
 from fastapi import HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from picsou_sidecar import PendingStore, configure_logging, create_app, safe
 from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
@@ -51,6 +58,7 @@ TR_APP_VERSION = "13.40.5"
 
 FLOW_CONFIRM_IN_APP = "confirmInApp"
 FLOW_OTP = "otp"
+FLOW_AUTHENTICATOR = "authenticator"
 
 PENDING_TTL_SECONDS = 600
 MAX_PENDING = 16
@@ -60,6 +68,7 @@ MAX_PENDING = 16
 # sidecar is always the one to give up.
 APP_VALIDATION_TIMEOUT_SECONDS = 120
 APP_VALIDATION_POLL_SECONDS = 2.0
+AUTHENTICATOR_COUNTDOWN_SECONDS = 120
 # v1 says nothing about the code's lifetime; the countdown only paces the UI.
 OTP_COUNTDOWN_SECONDS = 30
 
@@ -77,11 +86,23 @@ CALLER_TIMEOUT_S = 45
 TR_REQUEST_TIMEOUT_S = 8
 WAF_TOKEN_BUDGET_S = CALLER_TIMEOUT_S - TR_REQUEST_TIMEOUT_S - 5
 
+# The CSV export is three TR calls (request, polls, download) behind one refresh:
+# one budget covers them all, and a job that stays pending ends as a 502.
+EXPORT_BUDGET_S = 100
+EXPORT_MIN_POLL_SECONDS = 2
+EXPORT_MAX_DAYS = 1830
+EXPORT_DATE_PATTERN = r"[0-9]{4}-[0-9]{2}-[0-9]{2}"
+EXPORT_PATH = "/api/v1/portfolio-analytics/transactions/export"
+
 # Both values become URL path segments on api.traderepublic.com. TR's processId is a
 # UUID and the TAN is the 4-digit code; the patterns exclude every character that
-# could leave the segment (/ ? # . @ % ...).
+# could leave the segment (/ ? # . @ % ...). The authenticator code (6 digits) goes
+# in a JSON body, never in a URL.
 PROCESS_ID_PATTERN = r"[A-Za-z0-9-]{1,64}"
 TAN_PATTERN = r"[0-9]{4}"
+AUTHENTICATOR_CODE_PATTERN = r"[0-9]{6}"
+# Which flow takes which code; the request model only bounds the length.
+CODE_PATTERNS = {FLOW_OTP: TAN_PATTERN, FLOW_AUTHENTICATOR: AUTHENTICATOR_CODE_PATTERN}
 
 
 async def _dispose_pending_state(state: dict[str, Any]) -> None:
@@ -262,7 +283,8 @@ def tr_headers(waf_token: Optional[str], device_info: str) -> dict:
 
 
 def normalise_phone(phone: str) -> str:
-    phone = phone.strip()
+    # Separators are dropped so the stored phone is +<digits>, which the backend can mask.
+    phone = re.sub(r"[\s.\-()]", "", phone)
     if phone.startswith("0"):
         phone = "+33" + phone[1:]
     return phone
@@ -285,6 +307,12 @@ def poll_url(process_id: str) -> str:
     if not re.fullmatch(PROCESS_ID_PATTERN, process_id):
         raise ValueError("processId is not a valid path segment")
     return f"{TR_API}/api/v2/auth/web/login/processes/{process_id}"
+
+
+def authenticator_url(process_id: str) -> str:
+    if not re.fullmatch(PROCESS_ID_PATTERN, process_id):
+        raise ValueError("processId is not a valid path segment")
+    return f"{poll_url(process_id)}/authenticator-verification"
 
 
 def login_complete_url(process_id: str, tan: str) -> str:
@@ -361,7 +389,8 @@ def decode_claims(value: Any) -> dict:
     return decoded
 
 
-def build_session_state(cookies: dict[str, str], body_claims: Any = None) -> str:
+def build_session_state(cookies: dict[str, str], body_claims: Any = None,
+                        phone: Optional[str] = None) -> str:
     refresh, device = cookies.get("tr_refresh"), cookies.get("tr_device")
     if not refresh or not device:
         log.warning("TR login gave no refresh or device cookie (names: %s)", sorted(cookies))
@@ -377,7 +406,10 @@ def build_session_state(cookies: dict[str, str], body_claims: Any = None) -> str
     if not isinstance(sub, str) or not sub:
         log.warning("TR login gave no subject in its claims")
         raise format_changed()
-    return json.dumps({"refresh": refresh, "device": device, "sub": sub}, separators=(",", ":"))
+    state = {"refresh": refresh, "device": device, "sub": sub}
+    if phone:
+        state["phone"] = phone
+    return json.dumps(state, separators=(",", ":"))
 
 
 def parse_session_state(raw: str) -> dict[str, str]:
@@ -390,6 +422,9 @@ def parse_session_state(raw: str) -> dict[str, str]:
             isinstance(state.get(key), str) and state[key] for key in keys):
         raise HTTPException(status_code=422, detail="INVALID_SESSION_STATE")
     values = {key: state[key] for key in keys}
+    # Optional: states issued before the phone was kept do not have it.
+    if isinstance(state.get("phone"), str) and state["phone"]:
+        values["phone"] = state["phone"]
     # Both go into a raw Cookie header: refuse anything that could add a cookie or a header.
     if any(re.search(r"[;,\s\x00-\x1f\x7f]", values[key]) for key in ("refresh", "device")):
         raise HTTPException(status_code=422, detail="INVALID_SESSION_STATE")
@@ -400,16 +435,24 @@ def parse_session_state(raw: str) -> dict[str, str]:
 
 class InitiateRequest(BaseModel):
     phoneNumber: str = Field(min_length=1, max_length=64)
-    pin: str = Field(min_length=1, max_length=32)
+    pin: str = Field(min_length=1, max_length=128)
 
 
 class CompleteRequest(BaseModel):
     processId: str = Field(pattern=f"^{PROCESS_ID_PATTERN}$")
-    tan: Optional[str] = Field(default=None, pattern=f"^{TAN_PATTERN}$")
+    # 4 digits for flow otp, 6 for flow authenticator: complete() checks the flow's own.
+    tan: Optional[str] = Field(default=None, pattern=r"^[0-9]{4,6}$")
 
 
 class SessionRequest(BaseModel):
     sessionState: str = Field(min_length=2, max_length=20_000)
+
+
+class TransactionsRequest(BaseModel):
+    sessionState: str = Field(min_length=2, max_length=20_000)
+    # Not parsed here: a bad date is INVALID_DATA however it is wrong.
+    from_: str = Field(alias="from", min_length=1, max_length=32)
+    to: str = Field(min_length=1, max_length=32)
 
 
 # ─── Login: initiate ──────────────────────────────────────────────────────────
@@ -439,12 +482,41 @@ def tr_process_id(resp: httpx.Response) -> str:
     return process_id
 
 
+def requires_authenticator(resp: httpx.Response) -> bool:
+    try:
+        body = resp.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("requiredAction") == "AUTHENTICATOR_VERIFICATION"
+
+
+async def read_login_flow(client: httpx.AsyncClient, process_id: str, headers: dict,
+                          cookies: dict) -> tuple[str, dict]:
+    """(flow, cookies the poll set): the web reads the new v2 process once to learn
+    whether TR wants the authenticator code. A poll that fails leaves confirmInApp,
+    the default: /complete polls again and reports the error itself."""
+    try:
+        resp = await send(client, "GET", poll_url(process_id),
+                          headers={**headers, **login_cookie_header(cookies)})
+    except (TimeoutError, httpx.TransportError) as error:
+        log.warning("TR first poll did not answer error_type=%s", type(error).__name__)
+        return FLOW_CONFIRM_IN_APP, {}
+    log.info("TR first poll → %d", resp.status_code)
+    if not resp.is_success:
+        return FLOW_CONFIRM_IN_APP, {}
+    flow = FLOW_AUTHENTICATOR if requires_authenticator(resp) else FLOW_CONFIRM_IN_APP
+    return flow, parse_set_cookies(resp.headers)
+
+
 async def start_login(client: httpx.AsyncClient, credentials: dict, headers: dict) -> tuple[str, str, dict]:
     """(flow, TR processId, cookies set by the login): v2, then v1 when v2 fails over."""
     resp = await send(client, "POST", login_url("v2"), json=credentials, headers=headers)
     log.info("TR v2 login → %d", resp.status_code)
     if resp.is_success:
-        return FLOW_CONFIRM_IN_APP, tr_process_id(resp), parse_set_cookies(resp.headers)
+        process_id = tr_process_id(resp)
+        cookies = parse_set_cookies(resp.headers)
+        flow, poll_cookies = await read_login_flow(client, process_id, headers, cookies)
+        return flow, process_id, {**cookies, **poll_cookies}
     if not fails_over_to_v1(resp):
         raise_for_login_status(resp)
 
@@ -486,9 +558,11 @@ async def initiate(req: InitiateRequest) -> dict:
         "deviceInfo": device_info,
         "wafToken": waf_token,
         "cookies": cookies,
+        "phone": phone,
         "created_at": time.time(),
     })
-    countdown = APP_VALIDATION_TIMEOUT_SECONDS if flow == FLOW_CONFIRM_IN_APP else OTP_COUNTDOWN_SECONDS
+    countdown = {FLOW_CONFIRM_IN_APP: APP_VALIDATION_TIMEOUT_SECONDS,
+                 FLOW_AUTHENTICATOR: AUTHENTICATOR_COUNTDOWN_SECONDS}.get(flow, OTP_COUNTDOWN_SECONDS)
     return {"processId": process_id, "flow": flow, "countdownInSeconds": countdown}
 
 
@@ -526,15 +600,17 @@ def confirmation_outcome(resp: httpx.Response) -> Optional[tuple[dict, Any]]:
     return None
 
 
-async def await_app_confirmation(state: dict) -> tuple[dict, Any]:
+async def await_app_confirmation(state: dict, timeout: Optional[float] = None) -> tuple[dict, Any]:
     """Polls the v2 process until TR confirms; returns (cookies, claims from the body).
 
     One deadline bounds the whole wait: a poll or a WAF token fetch still running
-    when it passes is cancelled, so the call never outlasts APP_VALIDATION_TIMEOUT_SECONDS.
+    when it passes is cancelled, so the call never outlasts its timeout
+    (APP_VALIDATION_TIMEOUT_SECONDS unless the caller passes a shorter one).
     """
     url = poll_url(state["trProcessId"])
     try:
-        async with asyncio.timeout(APP_VALIDATION_TIMEOUT_SECONDS) as deadline:
+        async with asyncio.timeout(
+                APP_VALIDATION_TIMEOUT_SECONDS if timeout is None else timeout) as deadline:
             async with new_client() as client:
                 while True:
                     try:
@@ -594,29 +670,78 @@ async def submit_otp(state: dict, tan: str) -> tuple[dict, Any]:
     return parse_set_cookies(resp.headers), None
 
 
+def raise_for_authenticator_status(resp: httpx.Response) -> None:
+    if is_waf_rejection(resp):
+        raise waf_blocked()
+    if resp.status_code == 429:
+        raise rate_limited()
+    if resp.status_code >= 500:
+        raise upstream_unavailable()
+    if resp.is_success:
+        return
+    codes = error_codes(resp)
+    if "TOO_MANY_REQUESTS" in codes:
+        raise rate_limited()
+    if "PROCESS_GONE" in codes or "NOT_FOUND" in codes or resp.status_code == 404:
+        raise HTTPException(status_code=410, detail="AUTH_ATTEMPT_EXPIRED")
+    if "ALREADY_PROCESSED" in codes:
+        raise HTTPException(status_code=401, detail="APP_VALIDATION_CANCELLED")
+    # VALIDATION_CODE_INVALID, VALIDATION_CODE_ALREADY_USED and any other refusal.
+    raise HTTPException(status_code=401, detail="INVALID_OTP")
+
+
+async def submit_authenticator_code(state: dict, code: str) -> tuple[dict, Any]:
+    """v2 authenticator: posts the 6-digit code, then reads the process until TR
+    has finished it; returns (cookies of the verification and of the polls, claims).
+
+    TR still asks for the in-app confirmation after the code (measured live). The token
+    fetch, the code check and that wait share one APP_VALIDATION_TIMEOUT_SECONDS budget,
+    so this flow also answers before the backend's 150 s /complete timeout."""
+    deadline = time.monotonic() + APP_VALIDATION_TIMEOUT_SECONDS
+    waf_token = await get_waf_token()
+    if not waf_token:
+        raise waf_blocked()
+    async with new_client() as client:
+        resp = await send(client, "POST", authenticator_url(state["trProcessId"]), json={"code": code},
+                          headers={**tr_headers(waf_token, state["deviceInfo"]),
+                                   **login_cookie_header(state["cookies"])})
+    log.info("TR authenticator check → %d  set-cookie names: %s", resp.status_code, cookie_names(resp.headers))
+    raise_for_authenticator_status(resp)
+    verified = parse_set_cookies(resp.headers)
+    cookies, body_claims = await await_app_confirmation(
+        {**state, "wafToken": waf_token, "cookies": {**state["cookies"], **verified}},
+        max(0.0, deadline - time.monotonic()))
+    return {**verified, **cookies}, body_claims
+
+
 @app.post("/complete")
 async def complete(req: CompleteRequest) -> dict:
     state = await _pending.take(req.processId)
     if state is None:
         raise HTTPException(status_code=410, detail="AUTH_ATTEMPT_EXPIRED")
 
+    flow = state["flow"]
     try:
-        if state["flow"] == FLOW_CONFIRM_IN_APP:
+        if flow == FLOW_CONFIRM_IN_APP:
             cookies, body_claims = await await_app_confirmation(state)
         else:
-            if not req.tan:
+            if not req.tan or not re.fullmatch(CODE_PATTERNS[flow], req.tan):
                 await _pending.repark(req.processId, state)
                 raise HTTPException(status_code=422, detail="INVALID_OTP")
-            cookies, body_claims = await submit_otp(state, req.tan)
-        return {"sessionState": build_session_state({**state["cookies"], **cookies}, body_claims)}
+            if flow == FLOW_AUTHENTICATOR:
+                cookies, body_claims = await submit_authenticator_code(state, req.tan)
+            else:
+                cookies, body_claims = await submit_otp(state, req.tan)
+        return {"sessionState": build_session_state(
+            {**state["cookies"], **cookies}, body_claims, state.get("phone"))}
     except HTTPException as error:
         # A mistyped code does not burn the attempt: the member can type it again.
-        if state["flow"] == FLOW_OTP and error.detail == "INVALID_OTP" and req.processId not in _pending:
+        if flow in CODE_PATTERNS and error.detail == "INVALID_OTP" and req.processId not in _pending:
             await _pending.repark(req.processId, state)
         raise
     except (TimeoutError, httpx.TransportError) as error:
         log.warning("TR completion did not answer error_type=%s", type(error).__name__)
-        raise tr_unreachable() from error
+        raise tr_unreachable(502 if flow == FLOW_AUTHENTICATOR else 504) from error
     except Exception as error:
         log.exception("Unexpected TR completion failure")
         raise HTTPException(status_code=500, detail="INTERNAL_ERROR") from error
@@ -624,10 +749,8 @@ async def complete(req: CompleteRequest) -> dict:
 
 # ─── Session ──────────────────────────────────────────────────────────────────
 
-@app.post("/session")
-async def session(req: SessionRequest) -> dict:
-    state = parse_session_state(req.sessionState)
-    headers = {
+def refresh_headers(state: dict[str, str]) -> dict:
+    return {
         "Accept": "*/*",
         "Content-Type": "application/json",
         "Origin": TR_APP,
@@ -636,17 +759,13 @@ async def session(req: SessionRequest) -> dict:
         # httpx's cookies= would drop them: TR sets both with path=/api.
         "Cookie": f"tr_refresh={state['refresh']}; tr_device={state['device']}",
     }
-    try:
-        async with new_client() as client:
-            resp = await send(client, "POST", f"{TR_API}/api/v2/auth/web/session",
-                              json={"subjectId": state["sub"]}, headers=headers)
-    except (TimeoutError, httpx.TransportError) as error:
-        log.warning("TR session call did not answer error_type=%s", type(error).__name__)
-        raise tr_unreachable(502) from error
-    except Exception as error:
-        log.exception("Unexpected TR session failure")
-        raise HTTPException(status_code=500, detail="INTERNAL_ERROR") from error
 
+
+async def refresh_session(client: httpx.AsyncClient, state: dict[str, str]) -> tuple[httpx.Response, dict]:
+    """TR's session refresh: (response, cookies it set). Raises the HTTPException of a
+    rejected, throttled or failed refresh; transport errors are the caller's."""
+    resp = await send(client, "POST", f"{TR_API}/api/v2/auth/web/session",
+                      json={"subjectId": state["sub"]}, headers=refresh_headers(state))
     cookies = parse_set_cookies(resp.headers)
     log.info("TR session → %d  set-cookie names: %s", resp.status_code, sorted(cookies))
     if resp.status_code in (401, 403) and not is_waf_rejection(resp):
@@ -655,6 +774,23 @@ async def session(req: SessionRequest) -> dict:
         raise rate_limited()
     if not resp.is_success:
         raise upstream_unavailable()
+    return resp, cookies
+
+
+@app.post("/session")
+async def session(req: SessionRequest) -> dict:
+    state = parse_session_state(req.sessionState)
+    try:
+        async with new_client() as client:
+            _, cookies = await refresh_session(client, state)
+    except HTTPException:
+        raise
+    except (TimeoutError, httpx.TransportError) as error:
+        log.warning("TR session call did not answer error_type=%s", type(error).__name__)
+        raise tr_unreachable(502) from error
+    except Exception as error:
+        log.exception("Unexpected TR session failure")
+        raise HTTPException(status_code=500, detail="INTERNAL_ERROR") from error
 
     token = cookies.get("tr_session")
     if not token:
@@ -665,3 +801,98 @@ async def session(req: SessionRequest) -> dict:
         log.warning("TR session claims could not be decoded")
         raise format_changed() from error
     return {"sessionToken": token, "claims": claims}
+
+
+# ─── Transactions export ──────────────────────────────────────────────────────
+
+def export_range(raw_from: str, raw_to: str) -> tuple[str, str]:
+    """The validated (from, to) ISO dates of an export, or INVALID_DATA."""
+    try:
+        if not (re.fullmatch(EXPORT_DATE_PATTERN, raw_from) and re.fullmatch(EXPORT_DATE_PATTERN, raw_to)):
+            raise ValueError("not an ISO date")
+        start, end = date.fromisoformat(raw_from), date.fromisoformat(raw_to)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="INVALID_DATA") from error
+    if start > end or (end - start).days > EXPORT_MAX_DAYS:
+        raise HTTPException(status_code=422, detail="INVALID_DATA")
+    return start.isoformat(), end.isoformat()
+
+
+async def pause(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+def export_headers(cookie_header: dict, **extra: str) -> dict:
+    return {"Origin": TR_APP, "User-Agent": USER_AGENT, **extra, **cookie_header}
+
+
+def raise_for_export_status(resp: httpx.Response, expected: int, step: str) -> None:
+    log.info("TR export %s → %d", step, resp.status_code)
+    if resp.status_code == 429:
+        raise rate_limited()
+    if resp.status_code != expected:
+        raise upstream_unavailable()
+
+
+def export_job(resp: httpx.Response) -> tuple[str, str, float]:
+    """(jobId, status, estimated seconds remaining) of a request or status reply."""
+    try:
+        body = resp.json()
+    except ValueError:
+        raise format_changed()
+    job_id = body.get("jobId") if isinstance(body, dict) else None
+    status = body.get("status") if isinstance(body, dict) else None
+    if not isinstance(job_id, str) or not job_id or not isinstance(status, str):
+        raise format_changed()
+    estimate = body.get("estimatedSecondsRemaining")
+    if isinstance(estimate, bool) or not isinstance(estimate, (int, float)):
+        estimate = 0
+    return job_id, status, estimate
+
+
+async def download_export(client: httpx.AsyncClient, cookie_header: dict, start: str, end: str) -> bytes:
+    resp = await send(client, "POST", TR_API + EXPORT_PATH + "/request", json={"from": start, "to": end},
+                      headers=export_headers(cookie_header, **{"Accept": "*/*", "Content-Type": "application/json"}))
+    raise_for_export_status(resp, 202, "request")
+    job_id, status, estimate = export_job(resp)
+    params = {"jobId": job_id}
+
+    while status == "PENDING":
+        await pause(max(EXPORT_MIN_POLL_SECONDS, estimate))
+        resp = await send(client, "GET", TR_API + EXPORT_PATH + "/status", params=params,
+                          headers=export_headers(cookie_header, Accept="*/*"))
+        raise_for_export_status(resp, 200, "status")
+        _, status, estimate = export_job(resp)
+        log.info("TR export job status %s", safe(status, 40))
+    if status != "COMPLETED":
+        raise upstream_unavailable()
+
+    # Accept: application/json is a 406; the export is a CSV.
+    resp = await send(client, "GET", TR_API + EXPORT_PATH + "/download", params=params,
+                      headers=export_headers(cookie_header, Accept="*/*"))
+    raise_for_export_status(resp, 200, "download")
+    return resp.content
+
+
+@app.post("/transactions")
+async def transactions(req: TransactionsRequest) -> Response:
+    state = parse_session_state(req.sessionState)
+    start, end = export_range(req.from_, req.to)
+    try:
+        async with asyncio.timeout(EXPORT_BUDGET_S):
+            async with new_client() as client:
+                _, cookies = await refresh_session(client, state)
+                if not cookies.get("tr_session"):
+                    raise format_changed()
+                csv = await download_export(client, login_cookie_header(cookies), start, end)
+    except HTTPException:
+        raise
+    except (TimeoutError, httpx.TransportError) as error:
+        log.warning("TR export did not answer error_type=%s", type(error).__name__)
+        raise tr_unreachable(502) from error
+    except Exception as error:
+        log.exception("Unexpected TR export failure")
+        raise HTTPException(status_code=500, detail="INTERNAL_ERROR") from error
+
+    log.info("TR export → %d bytes, %d lines", len(csv), csv.count(b"\n"))
+    return Response(content=csv, media_type="text/csv; charset=utf-8")

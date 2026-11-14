@@ -97,12 +97,13 @@ Picsou publishes pre-built, multi-arch (amd64/arm64) images to the GitHub Contai
 | `ghcr.io/cloeille/picsou-finance/bourso-auth` | BoursoBank login/2FA sidecar |
 | `ghcr.io/cloeille/picsou-finance/caisse-epargne-auth` | Caisse d'Epargne login (keypad + Sécur'Pass) and accounts sidecar |
 | `ghcr.io/cloeille/picsou-finance/banque-populaire-auth` | Banque Populaire login (keypad + Sécur'Pass) and accounts sidecar |
+| `ghcr.io/cloeille/picsou-finance/bnp-auth` | BNP Paribas and Hello bank! browser-login sidecar (accounts, savings, PEA/CTO, life insurance, loans) |
 | `ghcr.io/cloeille/picsou-finance/lbp-auth` | La Banque Postale browser-login sidecar (current account and livrets) |
 | `ghcr.io/cloeille/picsou-finance/fortuneo-auth` | Fortuneo login/2FA and portfolio sidecar |
 | `ghcr.io/cloeille/picsou-finance/cmes-auth` | Crédit Mutuel / CIC Épargne Salariale login/2FA and plans sidecar |
 | `ghcr.io/cloeille/picsou-finance/natixis-auth` | Natixis Interépargne login/2FA and plans sidecar |
 
-Bank connectors (the `*-auth` sidecars) are opt-in: with no profile, Compose pulls and runs only the app and the database. Pick the banks you sync through a comma-separated `COMPOSE_PROFILES` list, or use `all-connectors` for every one. Add `tls` to that same list when you use the bundled Caddy proxy. Connector profiles: `amex`, `amundi`, `banque-populaire`, `bourse-direct`, `bourso`, `caisse-epargne`, `cic`, `cmes`, `corum`, `degiro`, `fortuneo`, `lbp`, `natixis`, `revolut`, `sofidy`, and `tr` (Trade Republic). The `tls` profile enables the bundled Caddy proxy. The app and the enabled connectors authenticate each other with one shared secret, `APP_SIDECAR_API_KEY`, required as soon as one connector is enabled; each connector refuses to start without it. Set the shared key before the first launch:
+Bank connectors (the `*-auth` sidecars) are opt-in: with no profile, Compose pulls and runs only the app and the database. Pick the banks you sync through a comma-separated `COMPOSE_PROFILES` list, or use `all-connectors` for every one. Add `tls` to that same list when you use the bundled Caddy proxy. Connector profiles: `amex`, `amundi`, `banque-populaire`, `bourse-direct`, `bnp`, `bourso`, `caisse-epargne`, `cic`, `cmes`, `corum`, `degiro`, `fortuneo`, `lbp`, `natixis`, `revolut`, `sofidy`, and `tr` (Trade Republic). The `tls` profile enables the bundled Caddy proxy. The app and the enabled connectors authenticate each other with one shared secret, `APP_SIDECAR_API_KEY`, required as soon as one connector is enabled; each connector refuses to start without it. Set the shared key before the first launch:
 
 ```bash
 [ -f docker/.env ] || cp docker/.env.example docker/.env
@@ -123,7 +124,7 @@ docker compose -f docker/docker-compose.yml pull    # fetch the published images
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-> The compose file pins `:latest`. To follow the bleeding edge instead, override with `:nightly` (built on every `main` push), or pin a release such as `:1.0.0`.
+> The compose file pins `:latest`, the highest release tag. To follow the bleeding edge instead, override with `:nightly`, which follows `main` and may carry migrations not yet released, or pin a release such as `:1.0.0`.
 >
 > Building from source instead of pulling? Run `docker compose -f docker/docker-compose.yml up --build` — the `build:` sections are kept for contributors.
 
@@ -171,6 +172,11 @@ Caddy picks the certificate strategy from `PICSOU_DOMAIN` alone — there is no 
 | A real domain (`picsou.example.com`) resolving to this host, `:80`+`:443` reachable | Let's Encrypt, publicly trusted | **Nothing.** Issued and renewed automatically |
 | A LAN IP (`192.168.1.50`) or a `.local` / `.internal` name | Caddy's built-in CA | Install its root once per device (3c) |
 | `picsou.localhost` (the default) | Caddy's built-in CA | Resolves **only on the Docker host** — fine for a smoke test, useless from a phone |
+
+When you open HTTPS with a LAN IP, some clients omit TLS SNI because the URL host is an IP
+literal. The bundled Caddy configuration uses `PICSOU_DOMAIN` as its default SNI in that case,
+so it can select the certificate it manages for that same address. The certificate still needs
+to be trusted on each device as described in 3c.
 
 A real domain is worth the effort: it is the only option with no per-device step. It does not need
 to be publicly reachable for day-to-day use — only during certificate issuance.
@@ -385,6 +391,7 @@ cp docker/.env.example docker/.env
 | `BANQUE_POPULAIRE_AUTH_URL` | Custom sidecar | Defaults to `http://banque-populaire-auth:8001` |
 | `BOURSE_DIRECT_AUTH_URL` | Custom sidecar | Defaults to `http://bourse-direct-auth:8001` |
 | `FORTUNEO_AUTH_URL` | Custom sidecar | Defaults to `http://fortuneo-auth:8001` |
+| `BNP_AUTH_URL` | Custom sidecar | Defaults to `http://bnp-auth:8001`. Set it to reach a `bnp-auth` sidecar run elsewhere (BNP Paribas, Hello bank!) |
 | `LBP_AUTH_URL` | Custom sidecar | Defaults to `http://lbp-auth:8001`. Set it to reach an `lbp-auth` sidecar run elsewhere (La Banque Postale) |
 | `CMES_AUTH_URL` | Custom sidecar | Defaults to `http://cmes-auth:8001`. Set it to reach a `cmes-auth` sidecar run elsewhere (Crédit Mutuel / CIC Épargne Salariale) |
 | `NATIXIS_AUTH_URL` | Custom sidecar | Defaults to `http://natixis-auth:8001`. Set it to reach a `natixis-auth` sidecar run elsewhere (Natixis Interépargne) |
@@ -411,13 +418,12 @@ Single sign-on, the admin group and a step-by-step Zitadel setup are described i
 
 ### 5. Enable Banking key setup (optional)
 
-```bash
-mkdir -p docker/secrets
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out docker/secrets/enablebanking.pem
-openssl rsa -pubout -in docker/secrets/enablebanking.pem -out enablebanking_public.pem
-```
-
-Upload `enablebanking_public.pem` to your Enable Banking dashboard.
+The setup wizard generates the key pair, or imports a PEM you already have, and stores the private
+key in the `picsou_data` volume (`/data/keys`). Upload the public key it shows to your Enable Banking
+dashboard. An imported key must be an unencrypted PKCS#8 RSA private key
+(`-----BEGIN PRIVATE KEY-----`). Convert a PKCS#1 one (`BEGIN RSA PRIVATE KEY`) with
+`openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.pem`. See
+[Bank sync](docs/features/bank-sync.md).
 
 ### Kubernetes (Helm)
 

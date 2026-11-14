@@ -1,7 +1,11 @@
 package com.picsou.adapter;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.picsou.adapter.sidecar.SidecarTestSupport;
 import com.picsou.adapter.sidecar.SidecarWebClientFactory;
 import com.picsou.exception.SyncException;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -11,6 +15,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -22,6 +27,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -211,6 +217,62 @@ class TradeRepublicAdapterTest {
         assertThat(codeOf(catchThrowable(() -> adapter.openSession("state")))).isEqualTo("UPSTREAM_UNAVAILABLE");
     }
 
+    // ─── fetchTransactionsCsv ─────────────────────────────────────────────────────────────
+
+    @Test
+    void fetchTransactionsCsv_postsTheWindowAndReturnsTheBodyUntouched() {
+        AtomicReference<String> body = new AtomicReference<>();
+        AtomicReference<String> path = new AtomicReference<>();
+        String csv = "datetime,date\n2026-10-01T10:00:00Z,2026-10-01\n";
+        server = HttpServer.create().host("127.0.0.1").port(0)
+            .handle((request, response) -> request.receive().aggregate().asString().doOnNext(body::set)
+                .then(Mono.fromRunnable(() -> path.set(request.path())))
+                .then(response.header("Content-Type", "text/csv").sendString(Mono.just(csv)).then()))
+            .bindNow();
+        TradeRepublicAdapter adapter = adapterFor(server, RESPONSE_TIMEOUT);
+
+        String result = adapter.fetchTransactionsCsv("state", LocalDate.of(2023, 11, 4), LocalDate.of(2026, 11, 4));
+
+        assertThat(result).isEqualTo(csv);
+        assertThat(path.get()).endsWith("transactions");
+        assertThat(body.get()).contains("\"sessionState\":\"state\"")
+            .contains("\"from\":\"2023-11-04\"").contains("\"to\":\"2026-11-04\"");
+    }
+
+    @Test
+    void fetchTransactionsCsv_returnsAnExportLargerThanTheDefault256KibCodecLimit() {
+        // A real 3-year export of 721 rows was 155 KB: about 1,200 rows cross Spring's 256 KiB default.
+        String row = "2026-10-01T10:00:00Z,2026-10-01,DEFAULT,CASH,CARD_PAYMENT," + "X".repeat(180) + "\n";
+        String csv = "datetime,date\n" + row.repeat(600 * 1024 / row.length());
+        assertThat(csv.getBytes(StandardCharsets.UTF_8).length).isGreaterThan(256 * 1024);
+        server = HttpServer.create().host("127.0.0.1").port(0)
+            .handle((request, response) -> request.receive().then(
+                response.header("Content-Type", "text/csv").sendString(Mono.just(csv)).then()))
+            .bindNow();
+        TradeRepublicAdapter adapter = new TradeRepublicAdapter(
+            SidecarTestSupport.factory("tr-auth", "http://127.0.0.1:" + server.port()), new ObjectMapper());
+
+        String result = adapter.fetchTransactionsCsv("state", LocalDate.of(2023, 11, 4), LocalDate.of(2026, 11, 4));
+
+        assertThat(result).isEqualTo(csv);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "401, SESSION_EXPIRED, SESSION_EXPIRED",
+        "422, INVALID_SESSION_STATE, INVALID_SESSION_STATE",
+        "422, INVALID_DATA, INVALID_DATA",
+        "429, RATE_LIMITED, RATE_LIMITED",
+        "502, UPSTREAM_UNAVAILABLE, UPSTREAM_UNAVAILABLE"
+    })
+    void fetchTransactionsCsv_keepsTheCodeTheSidecarDeclares(int status, String detail, String expected) {
+        TradeRepublicAdapter adapter = adapterReturning(status, "{\"detail\":\"" + detail + "\"}");
+
+        assertThat(codeOf(catchThrowable(() ->
+            adapter.fetchTransactionsCsv("state", LocalDate.of(2026, 1, 1), LocalDate.of(2026, 2, 1)))))
+            .isEqualTo(expected);
+    }
+
     private static String codeOf(Throwable thrown) {
         assertThat(thrown).isInstanceOf(SyncException.class);
         return ((SyncException) thrown).getCode();
@@ -286,6 +348,40 @@ class TradeRepublicAdapterTest {
 
         assertThat(securities(accounts).positions()).singleElement()
             .satisfies(position -> assertThat(position.currentPrice()).isEqualByComparingTo("200"));
+    }
+
+    // ─── fetchAccounts: what reaches the log ───────────────────────────────────────────────
+
+    /**
+     * Whoever operates the instance reads the log. It must not carry what the bank's frames
+     * carry: the cash account number, a balance, a quantity, a buy-in price, an account value.
+     */
+    @Test
+    void fetchAccounts_logsNoAccountNumberBalanceOrPosition() {
+        TradeRepublicAdapter adapter = adapterAgainstTr(
+            BTC, "{\"exchangeIds\":[\"BHS\"]}", Map.of(BTC + ".BHS", "60000"));
+        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(TradeRepublicAdapter.class);
+        var logs = new ListAppender<ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+
+        try {
+            adapter.fetchAccounts(sessionToken());
+        } finally {
+            logger.detachAppender(logs);
+        }
+
+        // TRACE is the opt-in level for raw frames; everything an instance logs by default is checked.
+        List<String> lines = logs.list.stream()
+            .filter(event -> event.getLevel().isGreaterOrEqual(Level.DEBUG))
+            .map(ILoggingEvent::getFormattedMessage)
+            .toList();
+        assertThat(lines).anyMatch(line -> line.contains("1 positions"));
+        assertThat(lines).anyMatch(line -> line.matches("TR WS <-- \\d+ A \\(\\d+ chars\\)"));
+        assertThat(lines).noneMatch(line -> line.contains("CASH1"));
+        assertThat(lines).noneMatch(line -> line.contains("\"amount\""));
+        assertThat(lines).noneMatch(line -> line.contains("netSize") || line.contains("averageBuyIn"));
+        assertThat(lines).noneMatch(line -> line.contains("30000"));
     }
 
     /**

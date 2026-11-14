@@ -32,7 +32,6 @@ services:
       # wizard's crypto key. Mounted named volume so they persist across
       # container replacement and are shared with the db when it needs them.
       - picsou_data:/data
-      - ./secrets/enablebanking.pem:/run/secrets/enablebanking.pem:ro
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-picsou}?sslmode=prefer
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-picsou}
@@ -138,7 +137,7 @@ services:
 
   sidecar-camoufox:
     image: ghcr.io/cloeille/picsou-finance/sidecar-camoufox:latest
-    profiles: ["amex", "revolut", "all-connectors"]
+    profiles: ["amex", "bnp", "revolut", "all-connectors"]
     build:
       context: ../services/base
       target: camoufox
@@ -205,6 +204,21 @@ services:
       # log line of a contract Picsou does not import. See services/caisse-epargne-auth/README.md.
       CE_LOG_PRODUCT_DETAILS: ${CE_LOG_PRODUCT_DETAILS:-}
 
+  bnp-auth:
+    image: ghcr.io/cloeille/picsou-finance/bnp-auth:latest
+    profiles: ["bnp", "all-connectors"]
+    build:
+      context: ../services/bnp-auth
+      dockerfile: Dockerfile
+      args:
+        SIDECAR_BASE: sidecar-camoufox
+      additional_contexts:
+        sidecar-camoufox: service:sidecar-camoufox
+    restart: unless-stopped
+    init: true
+    environment:
+      APP_SIDECAR_API_KEY: ${APP_SIDECAR_API_KEY:-}
+
   lbp-auth:
     image: ghcr.io/cloeille/picsou-finance/lbp-auth:latest
     profiles: ["lbp", "all-connectors"]
@@ -232,6 +246,7 @@ services:
     restart: unless-stopped
     environment:
       APP_SIDECAR_API_KEY: ${APP_SIDECAR_API_KEY:-}
+      CE_LOG_PRODUCT_DETAILS: ${CE_LOG_PRODUCT_DETAILS:-}
 
   bourse-direct-auth:
     image: ghcr.io/cloeille/picsou-finance/bourse-direct-auth:latest

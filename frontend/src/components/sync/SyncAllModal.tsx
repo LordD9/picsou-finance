@@ -53,6 +53,7 @@ import {
   useSyncCryptoWallet,
   useSyncTradeRepublic,
   useInitiateTrAuth,
+  useReconnectTrAuth,
   useCompleteTrAuth,
   useDegiroSessionStatus,
   useSyncDegiro,
@@ -66,11 +67,12 @@ import {
 import { useAccounts } from '@/features/accounts/hooks'
 import { formatTimeAgo } from '@/lib/utils'
 import type { Account } from '@/types/api'
-import { formatApiError, formatTrAuthError, isTrAttemptOverError, isTrSessionDeadError } from '@/lib/errors'
+import { formatApiError, formatTrAuthError, isTrAttemptOverError, isTrInvalidSessionStateError, isTrSessionDeadError } from '@/lib/errors'
 import { TrAppConfirmation } from '@/components/sync/TrAppConfirmation'
 import { syncKeys } from '@/features/sync/keys'
 import { revolutErrorLabel } from '@/features/sync/revolut-phase'
-import { TR_VERIFICATION_CODE_LENGTH } from '@/lib/constants'
+import { TR_AUTHENTICATOR_CODE_LENGTH, TR_PIN_MAX_LENGTH, TR_VERIFICATION_CODE_LENGTH } from '@/lib/constants'
+import type { TrAuthInitResponse } from '@/types/api'
 
 const REVOLUT_CONNECTION_ID = 'revolut'
 
@@ -99,7 +101,7 @@ type SyncConnection = {
   id: string
   providerType: 'bank' | 'exchange' | 'wallet' | 'tr' | 'finary' | 'bourso' | 'revolut'
     | 'amundi' | 'fortuneo' | 'bourse-direct' | 'degiro' | 'ibkr' | 'simplefin' | 'wise'
-    | 'amex' | 'corum' | 'sofidy' | 'caisse-epargne' | 'banque-populaire' | 'lbp' | 'cmes' | 'natixis' | 'cic'
+    | 'amex' | 'corum' | 'sofidy' | 'caisse-epargne' | 'banque-populaire' | 'lbp' | 'bnp' | 'cmes' | 'natixis' | 'cic'
   name: string
   status: string
   lastSyncedAt: string | null
@@ -132,6 +134,7 @@ const ProviderIcon: Record<SyncConnection['providerType'], React.ComponentType<{
   'caisse-epargne': Landmark,
   'banque-populaire': Landmark,
   lbp: Landmark,
+  bnp: Landmark,
   cmes: PiggyBank,
   natixis: PiggyBank,
   cic: PiggyBank,
@@ -153,6 +156,7 @@ const REAUTH_TAB: Partial<Record<SyncConnection['providerType'], string>> = {
   'caisse-epargne': 'caisse-epargne',
   'banque-populaire': 'banque-populaire',
   lbp: 'lbp',
+  bnp: 'bnp',
   cmes: 'cmes',
   natixis: 'natixis',
   cic: 'cic',
@@ -225,6 +229,7 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
   const { data: caisseEpargneStatus } = useProviderStatus("caisseEpargne")
   const { data: banquePopulaireStatus } = useProviderStatus("banquePopulaire")
   const { data: lbpStatus } = useProviderStatus("lbp")
+  const { data: bnpStatus } = useProviderStatus("bnp")
   const { data: revolutStatus } = useRevolutStatus()
   const { data: finaryStatus } = useFinaryConnectionStatus()
   const { data: amundiStatus } = useProviderStatus("amundi")
@@ -311,6 +316,13 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
       running: isJobRunning(lbpStatus?.syncStatus),
     },
     {
+      type: 'bnp' as const, name: 'BNP Paribas / Hello bank!', provider: 'BNP Paribas',
+      active: bnpStatus?.isActive ?? false, lastSyncedAt: bnpStatus?.lastSyncCompletedAt ?? null,
+      hasSession: bnpStatus != null && (bnpStatus.isActive || bnpStatus.syncStatus !== 'IDLE'),
+      failed: bnpStatus?.syncStatus === 'FAILED',
+      running: isJobRunning(bnpStatus?.syncStatus),
+    },
+    {
       type: 'bourse-direct' as const, name: 'Bourse Direct', provider: 'Bourse Direct',
       active: bourseDirectStatus?.isActive ?? false, lastSyncedAt: bourseDirectStatus?.lastSyncCompletedAt ?? null,
       failed: bourseDirectStatus?.syncStatus === 'FAILED',
@@ -386,7 +398,7 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
       running: isJobRunning(cicStatus?.syncStatus),
       canReconnect: cicStatus?.canReconnect === true,
     },
-  ], [cicStatus, cmesStatus, natixisStatus, amexStatus, corumStatus, sofidyStatus, amundiStatus, fortuneoStatus, boursoStatus, caisseEpargneStatus, banquePopulaireStatus, lbpStatus, bourseDirectStatus, degiroStatus, ibkrStatus, simplefinStatus, wiseStatus])
+  ], [cicStatus, cmesStatus, natixisStatus, amexStatus, corumStatus, sofidyStatus, amundiStatus, fortuneoStatus, boursoStatus, caisseEpargneStatus, banquePopulaireStatus, lbpStatus, bnpStatus, bourseDirectStatus, degiroStatus, ibkrStatus, simplefinStatus, wiseStatus])
 
   const retryBankMutation     = useRetryBankSync()
   const reconnectBankMutation = useReconnectBankSync()
@@ -394,11 +406,13 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
   const syncWalletMutation   = useSyncCryptoWallet()
   const syncTrMutation       = useSyncTradeRepublic()
   const initiateTrMutation   = useInitiateTrAuth()
+  const reconnectTrMutation  = useReconnectTrAuth()
   const completeTrMutation   = useCompleteTrAuth()
   const syncBoursoMutation   = useProviderSync("bourso")
   const syncCaisseEpargneMutation = useProviderSync("caisseEpargne")
   const syncBanquePopulaireMutation = useProviderSync("banquePopulaire")
   const syncLbpMutation = useProviderSync("lbp")
+  const syncBnpMutation = useProviderSync("bnp")
   const syncAmundiMutation       = useProviderSync("amundi")
   const syncFortuneoMutation     = useProviderSync("fortuneo")
   const syncBourseDirectMutation = useProviderSync("bourseDirect")
@@ -425,6 +439,11 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
   const [trTan, setTrTan] = useState('')
   const [trProcessId, setTrProcessId] = useState<string | null>(null)
   const [trCountdown, setTrCountdown] = useState(0)
+  const [trAuthenticator, setTrAuthenticator] = useState(false)
+  const [trReconnectOff, setTrReconnectOff] = useState(false)
+  const trMaskedPhone = trStatus?.maskedPhone ?? null
+  const trReconnecting = trMaskedPhone !== null && !trReconnectOff
+  const trCodeLength = trAuthenticator ? TR_AUTHENTICATOR_CODE_LENGTH : TR_VERIFICATION_CODE_LENGTH
   const [trAuthError, setTrAuthError] = useState<string | null>(null)
 
   // Per-connection sync/retry errors, keyed by connection id
@@ -601,6 +620,9 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
       case 'lbp':
         syncLbpMutation.mutate(undefined, rowCallbacks(formatGeneric))
         break
+      case 'bnp':
+        syncBnpMutation.mutate(undefined, rowCallbacks(formatGeneric))
+        break
       case 'amundi':
         syncAmundiMutation.mutate(undefined, rowCallbacks(formatGeneric))
         break
@@ -675,6 +697,7 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
     syncCaisseEpargneMutation,
     syncBanquePopulaireMutation,
     syncLbpMutation,
+    syncBnpMutation,
     syncAmundiMutation,
     syncFortuneoMutation,
     syncBourseDirectMutation,
@@ -813,33 +836,40 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
 
   function handleTrInitiate(e: React.FormEvent) {
     e.preventDefault()
-    initiateTrMutation.mutate(
-      { phoneNumber: trPhone, pin: trPin },
-      {
-        onSuccess: (data) => {
-          setTrProcessId(data.processId)
-          setTrAuthError(null)
-          if (data.flow === 'confirmInApp') {
-            setTrCountdown(data.countdownInSeconds)
-            setTrAuthStep('app')
-            completeTrLogin(data.processId)
-            return
-          }
-          setTrAuthStep('tan')
-        },
-        onError: (err: unknown) => {
-          setTrAuthError(formatTrAuthError(err, t))
-          setTrProcessId(null)
-          setTrTan('')
-          setTrAuthStep('phone')
-        },
+    const callbacks = {
+      onSuccess: (data: TrAuthInitResponse) => {
+        setTrProcessId(data.processId)
+        setTrAuthError(null)
+        if (data.flow === 'confirmInApp') {
+          setTrCountdown(data.countdownInSeconds)
+          setTrAuthStep('app')
+          completeTrLogin(data.processId)
+          return
+        }
+        setTrAuthenticator(data.flow === 'authenticator')
+        setTrAuthStep('tan')
       },
-    )
+      onError: (err: unknown) => {
+        if (trReconnecting && isTrInvalidSessionStateError(err)) {
+          // No phone stored server-side: fall back to the full phone + PIN form.
+          setTrReconnectOff(true)
+          setTrPin('')
+          setTrAuthError(null)
+        } else {
+          setTrAuthError(formatTrAuthError(err, t))
+        }
+        setTrProcessId(null)
+        setTrTan('')
+        setTrAuthStep('phone')
+      },
+    }
+    if (trReconnecting) reconnectTrMutation.mutate({ pin: trPin }, callbacks)
+    else initiateTrMutation.mutate({ phoneNumber: trPhone, pin: trPin }, callbacks)
   }
 
   function handleTrComplete(e: React.FormEvent) {
     e.preventDefault()
-    if (!trProcessId || trTan.length !== TR_VERIFICATION_CODE_LENGTH) return
+    if (!trProcessId || trTan.length !== trCodeLength) return
     completeTrLogin(trProcessId, trTan)
   }
 
@@ -850,6 +880,8 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
     setTrTan('')
     setTrProcessId(null)
     setTrAuthError(null)
+    setTrAuthenticator(false)
+    setTrReconnectOff(false)
   }
 
   return (
@@ -1009,20 +1041,30 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
                         )}
                         {trAuthStep === 'phone' && (
                           <form onSubmit={handleTrInitiate} className="space-y-3">
-                            <div className="space-y-1">
-                              <Label htmlFor="tr-modal-phone">
-                                <Smartphone className="size-3 inline-block mr-1" />
-                                {t('sync.tr.phone')}
-                              </Label>
-                              <Input
-                                id="tr-modal-phone"
-                                type="tel"
-                                value={trPhone}
-                                onChange={e => setTrPhone(e.target.value)}
-                                placeholder="+49..."
-                                required
-                              />
-                            </div>
+                            {trReconnecting ? (
+                              <div className="space-y-1">
+                                <p className="text-xs text-muted-foreground">
+                                  <Smartphone className="size-3 inline-block mr-1" />
+                                  {t('sync.tr.reconnectPhone')}
+                                </p>
+                                <p className="font-mono text-sm" data-testid="tr-modal-masked-phone">{trMaskedPhone}</p>
+                              </div>
+                            ) : (
+                              <div className="space-y-1">
+                                <Label htmlFor="tr-modal-phone">
+                                  <Smartphone className="size-3 inline-block mr-1" />
+                                  {t('sync.tr.phone')}
+                                </Label>
+                                <Input
+                                  id="tr-modal-phone"
+                                  type="tel"
+                                  value={trPhone}
+                                  onChange={e => setTrPhone(e.target.value)}
+                                  placeholder="+49..."
+                                  required
+                                />
+                              </div>
+                            )}
                             <div className="space-y-1">
                               <Label htmlFor="tr-modal-pin">
                                 <Lock className="size-3 inline-block mr-1" />
@@ -1033,12 +1075,14 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
                                 type="password"
                                 value={trPin}
                                 onChange={e => setTrPin(e.target.value)}
+                                maxLength={TR_PIN_MAX_LENGTH}
+                                autoComplete="current-password"
                                 required
                               />
                             </div>
                             <div className="flex gap-2">
-                              <Button type="submit" size="sm" disabled={initiateTrMutation.isPending}>
-                                {initiateTrMutation.isPending && <Loader2 className="size-3 animate-spin" />}
+                              <Button type="submit" size="sm" disabled={initiateTrMutation.isPending || reconnectTrMutation.isPending}>
+                                {(initiateTrMutation.isPending || reconnectTrMutation.isPending) && <Loader2 className="size-3 animate-spin" />}
                                 {t('sync.tr.connect')}
                               </Button>
                               <Button type="button" size="sm" variant="outline" onClick={resetTrAuth}>
@@ -1055,21 +1099,24 @@ export function SyncAllModal({ open, onOpenChange }: SyncAllModalProps) {
                             <div className="space-y-1">
                               <Label htmlFor="tr-modal-tan">
                                 <ShieldCheck className="size-3 inline-block mr-1" />
-                                {t('sync.tr.tan')}
+                                {trAuthenticator ? t('sync.tr.authenticatorCode') : t('sync.tr.tan')}
                               </Label>
+                              {trAuthenticator && (
+                                <p className="text-xs text-muted-foreground">{t('sync.tr.authenticatorPrompt')}</p>
+                              )}
                               <Input
                                 id="tr-modal-tan"
                                 value={trTan}
-                                onChange={e => setTrTan(e.target.value.replace(/\D/g, '').slice(0, TR_VERIFICATION_CODE_LENGTH))}
+                                onChange={e => setTrTan(e.target.value.replace(/\D/g, '').slice(0, trCodeLength))}
                                 inputMode="numeric"
                                 autoComplete="one-time-code"
-                                maxLength={TR_VERIFICATION_CODE_LENGTH}
+                                maxLength={trCodeLength}
                                 autoFocus
                                 required
                               />
                             </div>
                             <div className="flex gap-2">
-                              <Button type="submit" size="sm" disabled={completeTrMutation.isPending || trTan.length !== TR_VERIFICATION_CODE_LENGTH}>
+                              <Button type="submit" size="sm" disabled={completeTrMutation.isPending || trTan.length !== trCodeLength}>
                                 {completeTrMutation.isPending && <Loader2 className="size-3 animate-spin" />}
                                 {t('sync.tr.connect')}
                               </Button>

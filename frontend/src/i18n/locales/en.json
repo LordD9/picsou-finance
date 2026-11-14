@@ -1206,8 +1206,9 @@
       "property": "House, apartment, land…",
       "fortuneo": "Sync your Fortuneo accounts",
       "caisseEpargne": "Current account, Livret A, LDDS, PEL, LEP, PER, life insurance, loans and cards at Caisse d'Epargne",
-      "banquePopulaire": "Current account, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, term deposit and cooperative shares at Banque Populaire",
-      "lbp": "Current account, Livret A and LEP at La Banque Postale"
+      "banquePopulaire": "Current account, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, term deposit, cooperative shares and PER at Banque Populaire",
+      "lbp": "Current account, Livret A and LEP at La Banque Postale",
+      "bnp": "Current accounts, savings, securities and life insurance at BNP Paribas or Hello bank!"
     }
   },
   "sync": {
@@ -1252,7 +1253,7 @@
     "tr": {
       "title": "Trade Republic",
       "phone": "Phone number",
-      "pin": "PIN code",
+      "pin": "PIN or password",
       "tan": "Verification code",
       "connect": "Connect",
       "sync": "Synchronize",
@@ -1263,16 +1264,16 @@
       "errors": {
         "tooManyAttempts": "Too many attempts. Please wait a few minutes.",
         "invalidPhoneNumber": "Invalid phone number.",
-        "invalidPin": "Incorrect PIN.",
+        "invalidPin": "Incorrect PIN or password.",
         "invalidTan": "The verification code is incorrect or expired. Use the latest code you received, or restart the step to receive a new one.",
         "authenticationFailed": "Trade Republic authentication failed.",
         "serviceUnavailable": "The local Trade Republic service is unavailable. Restart the servers, then try again.",
         "serverError": "Trade Republic server error. Please try again.",
         "phoneNumberRequired": "Phone number is required.",
-        "pinRequired": "PIN is required.",
+        "pinRequired": "PIN or password is required.",
         "validationFailed": "Invalid data.",
         "unknownError": "An unexpected error occurred.",
-        "invalidCredentials": "Incorrect Trade Republic phone number or PIN.",
+        "invalidCredentials": "Incorrect Trade Republic phone number or PIN/password.",
         "appValidationTimeout": "The login was not confirmed in the app in time. Please start over.",
         "appValidationCancelled": "The login was declined in the Trade Republic app. Please start over.",
         "authAttemptExpired": "The authentication attempt expired. Please start over.",
@@ -1284,7 +1285,11 @@
       "queued": "Sync queued…",
       "syncing": "Syncing…",
       "syncSuccess": "Last sync succeeded.",
-      "staleAccounts": "Your Trade Republic accounts are no longer updated: their session has ended. Sign in again below to resume the daily sync."
+      "staleAccounts": "Your Trade Republic accounts are no longer updated: their session has ended. Sign in again below to resume the daily sync.",
+      "authenticatorCode": "Authenticator code",
+      "authenticatorPrompt": "Enter the 6-digit code from your authenticator app, then confirm the sign-in in the Trade Republic app.",
+      "reconnectPhone": "Phone number",
+      "useAnotherNumber": "Use another number"
     },
     "revolut": {
       "title": "Revolut",
@@ -1593,7 +1598,7 @@
       "openRevolut": "Open the Revolut page to connect",
       "sessionExpired": "Session expired",
       "reconnect": "Reconnect on the provider's tab",
-      "trManualInfo": "Trade Republic is the only bank that requires manual re-authentication. You will need to re-enter your phone number and PIN each time you sync.",
+      "trManualInfo": "Trade Republic sessions end after about 24 hours. To reconnect, re-enter your PIN or password; the phone number is kept.",
       "trSlowWarning": "Connection may take a few moments, this is normal.",
       "revolutManualInfo": "Revolut requires approval on your phone. Click the icon to enter your credentials."
     },
@@ -1700,7 +1705,7 @@
       "disconnectConfirmAction": "Delete the stored session",
       "noSession": "No active session",
       "sessionActive": "Session active",
-      "scope": "Syncs your Banque Populaire current accounts, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, term deposits and cooperative shares on demand. Only the session and your identifier are kept, encrypted; never your password. Contracts Picsou cannot import are listed but never created.",
+      "scope": "Syncs your Banque Populaire current accounts, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, term deposits, cooperative shares and PER on demand. Only the session and your identifier are kept, encrypted; never your password. Contracts Picsou cannot import are listed but never created.",
       "notice": {
         "neverStored": "Picsou never sees or stores your password. You click it on the bank's keypad yourself; only the positions of the keys are sent, once.",
         "noRetry": "Picsou never retries a sign-in. If it fails, nothing is sent again until you submit the form yourself.",
@@ -2122,6 +2127,73 @@
         "formatChanged": "Fortuneo changed its portfolio format. Your existing data was kept unchanged.",
         "invalidData": "Fortuneo returned inconsistent portfolio data. Your existing data was kept unchanged.",
         "serverError": "Could not reach Fortuneo. Please try again."
+      }
+    },
+    "bnp": {
+      "title": "BNP Paribas / Hello bank!",
+      "customerId": "Customer number",
+      "brand": "Bank",
+      "brands": {
+        "bnp": "BNP Paribas",
+        "hellobank": "Hello bank!"
+      },
+      "connect": "Connect",
+      "connecting": "Connecting…",
+      "sync": "Sync",
+      "queued": "Sync queued…",
+      "syncing": "Syncing…",
+      "syncSuccess": "Last sync succeeded.",
+      "clearSession": "Disconnect",
+      "disconnectConfirm": "Delete the stored BNP Paribas / Hello bank! session from Picsou? The bank's own session is not revoked.",
+      "disconnectConfirmAction": "Delete the session",
+      "noSession": "No session",
+      "sessionActive": "Session active",
+      "scope": "Imports current accounts, savings, securities accounts (PEA, securities account) with their positions, life insurance (balance only) and loans, as far as the bank's site exposes them. Products Picsou does not recognise are listed, never guessed.",
+      "notice": {
+        "neverStored": "Your password is never stored: you click it on the bank's own keypad, shown below.",
+        "noRetry": "Only one attempt is made. A wrong password counts against the bank's limit and nothing is retried automatically.",
+        "lockRisk": "Too many wrong attempts can lock your access at the bank.",
+        "unverified": "Not yet verified against a real account: the login page was checked, but the second factor and the data import follow the open-source woob module."
+      },
+      "approvalPrompt": "Approve the sign-in in your bank's mobile app.",
+      "approvalHint": "This page waits for your approval, then imports your accounts.",
+      "countdownLabel": "Time left:",
+      "codePrompt": "Enter the code the bank sent you by SMS.",
+      "codeHint": "The code is sent once to the bank and never stored.",
+      "code": "SMS code",
+      "sendCode": "Send the code",
+      "sendingCode": "Sending…",
+      "unsupportedTitle": "Products not imported",
+      "unsupportedHint": "Picsou does not import these products yet. Only the product family code is shown.",
+      "errors": {
+        "invalidIdentifier": "The customer number must be 7 to 10 digits.",
+        "invalidCredentials": "The bank refused these credentials. Wait before trying again.",
+        "invalidCode": "The code is wrong. Check the SMS and try again.",
+        "keypadChanged": "The bank's login page changed. Nothing was sent.",
+        "keypadExpired": "The keypad expired. Start again.",
+        "invalidPositions": "The keypad answer was refused. Start again.",
+        "mfaUnsupported": "This second factor is not supported by Picsou.",
+        "actionRequired": "The bank requires an action on its own site (password change or reactivation).",
+        "rateLimited": "Too many attempts. Wait before trying again.",
+        "rateLimitedRetryAfter": "Too many attempts. Try again in about {{minutes}} min.",
+        "tooManySyncs": "Too many syncs. Wait before trying again.",
+        "tooManySyncsRetryAfter": "Too many syncs. Try again in about {{minutes}} min.",
+        "appValidationTimeout": "The approval did not arrive in time. Start again.",
+        "authAttemptExpired": "This sign-in attempt expired. Start again.",
+        "sessionExpired": "The session expired. Sign in again.",
+        "formatChanged": "The bank's site no longer looks as expected. Nothing was imported.",
+        "invalidSessionState": "The stored session is unusable. Sign in again.",
+        "serverError": "Something went wrong. Try again later."
+      },
+      "keypad": {
+        "title": "Click your password",
+        "description": "Click the keys showing the six digits of your password, in order. The keys are shuffled by the bank. Picsou does not see your digits.",
+        "key": "Key {{position}}",
+        "entered": "{{count}} of 6 digits entered",
+        "countdownLabel": "Time left:",
+        "cancel": "Cancel",
+        "clear": "Clear",
+        "validate": "Validate"
       }
     }
   },

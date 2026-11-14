@@ -36,6 +36,17 @@ appear after the form; a Playwright locator handler declines it whenever it show
 overlay otherwise swallows the submit click until the login times out. The backend waits up to
 90 s for `/initiate` to cover two form waits and the login outcome.
 
+After the submit, the sidecar watches AMEX's own login request
+(`/myca/logon/emea/action/login`). Akamai Bot Manager refuses a login it scores
+as a bot by answering that request 403; the page retries it and shows nothing.
+Two 403s in a row end the login at once with HTTP 503 `UPSTREAM_UNAVAILABLE`
+and the warning `AMEX login blocked by anti-bot login_post_403=… akamai_edge=…`
+(`akamai_edge` is true when the 403 carries Akamai's `Server` header). The
+password never reached the credential check, so this is never
+`INVALID_CREDENTIALS`. Retrying from the same host feeds the bot score: wait
+before the next login. A plain `outcome=timeout` warning carries
+`login_post_responses=…`; 0 means the request never got an answer.
+
 **Previous session and unattended login (#537, sidecar side).** `/initiate` accepts an optional
 `sessionState` (a session this sidecar produced): its cookies are added to the new browser
 context before the login page opens, so AMEX can recognise a trusted device; unreadable or
@@ -130,7 +141,7 @@ Demo mode ships a fictional AMEX card (account 12, with history and transactions
 - `AmexSyncServiceTest`, `AmexAdapterTest`, `AmexControllerTest`
 - `RecurringSeriesServiceTest`, `HistoryServiceTest`, `AccountServiceTest` (card sign)
 - `TransactionsList.test.tsx` (header actions), `AccountForm.test.tsx` and `MonthEndBalanceModal.test.tsx` (card amount owed), `features/accounts/hooks.test.tsx` (debts out of the cash line), `money-axis.test.tsx` (chart axis masking)
-- `test_parsers.py`, `test_sidecar_auth.py` and `test_login_form.py` (reload and 502/503 classification of a missing login form) inside the built container
+- `test_parsers.py`, `test_sidecar_auth.py`, `test_login_form.py` (reload and 502/503 classification of a missing login form) and `test_login_blocked.py` (anti-bot 403 on the login request) inside the built container
 
 ## Links
 

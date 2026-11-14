@@ -24,6 +24,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.net.URI;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -70,6 +71,14 @@ public class TradeRepublicAdapter {
      */
     private static final Duration DEFAULT_COMPLETE_TIMEOUT = Duration.ofSeconds(150);
     private static final Duration DEFAULT_SESSION_TIMEOUT = Duration.ofSeconds(45);
+    /** TR renders the export on demand, which takes a while over a long window. */
+    private static final Duration DEFAULT_TRANSACTIONS_TIMEOUT = Duration.ofSeconds(120);
+    /**
+     * The CSV export is read whole, and Spring's 256 KiB default drops it from about 1,200 rows
+     * (a real 721-row, 3-year export was 155 KB). 16 MiB, as for Caisse d'Epargne, holds some
+     * 70,000 rows, past what the 5-year window the sidecar accepts can carry.
+     */
+    private static final int TRANSACTIONS_MAX_BYTES = 16 * 1024 * 1024;
     // Total time the WebSocket read may take before the sync goes on with what it has.
     // Kept under WS_HARD_TIMEOUT around the whole exchange, which fails the sync.
     static final Duration WS_WAIT_CAP = Duration.ofSeconds(30);
@@ -89,6 +98,7 @@ public class TradeRepublicAdapter {
     private final Duration      authTimeout;
     private final Duration      completeTimeout;
     private final Duration      sessionTimeout;
+    private final Duration      transactionsTimeout;
     private final URI           wsUri;
 
     @Autowired
@@ -98,7 +108,8 @@ public class TradeRepublicAdapter {
     ) {
         this(
             objectMapper,
-            clients.create(SidecarBank.TRADE_REPUBLIC.label(), SidecarBank.TRADE_REPUBLIC.serviceName()),
+            clients.create(SidecarBank.TRADE_REPUBLIC.label(), SidecarBank.TRADE_REPUBLIC.serviceName(),
+                builder -> builder.codecs(c -> c.defaultCodecs().maxInMemorySize(TRANSACTIONS_MAX_BYTES))),
             DEFAULT_AUTH_TIMEOUT,
             DEFAULT_COMPLETE_TIMEOUT,
             DEFAULT_SESSION_TIMEOUT,
@@ -107,7 +118,7 @@ public class TradeRepublicAdapter {
     }
 
     TradeRepublicAdapter(ObjectMapper objectMapper, WebClient client, Duration timeout, URI wsUri) {
-        this(objectMapper, client, timeout, timeout, timeout, wsUri);
+        this(objectMapper, client, timeout, timeout, timeout, timeout, wsUri);
     }
 
     TradeRepublicAdapter(
@@ -118,6 +129,20 @@ public class TradeRepublicAdapter {
         Duration sessionTimeout,
         URI wsUri
     ) {
+        this(objectMapper, client, authTimeout, completeTimeout, sessionTimeout,
+            DEFAULT_TRANSACTIONS_TIMEOUT, wsUri);
+    }
+
+    TradeRepublicAdapter(
+        ObjectMapper objectMapper,
+        WebClient client,
+        Duration authTimeout,
+        Duration completeTimeout,
+        Duration sessionTimeout,
+        Duration transactionsTimeout,
+        URI wsUri
+    ) {
+        this.transactionsTimeout = transactionsTimeout;
         this.objectMapper    = objectMapper;
         this.sidecar         = new SidecarClient(client, objectMapper, SidecarBank.TRADE_REPUBLIC,
             SidecarErrorCode.AUTH_ATTEMPT_EXPIRED);
@@ -134,7 +159,7 @@ public class TradeRepublicAdapter {
      * TR has asked for the second factor. Credentials are NOT stored: they are used only for this call.
      *
      * @param phoneNumber international format (+33…) or local (06…, auto-converted)
-     * @param pin         numeric PIN
+     * @param pin         4-digit PIN or password (1..128 characters)
      */
     public TrInitiate initiateAuth(String phoneNumber, String pin) {
         log.info("Delegating TR auth initiation to tr-auth sidecar");
@@ -157,7 +182,7 @@ public class TradeRepublicAdapter {
      * Step 2: waits for the in-app confirmation (or checks the 4-digit code) and returns the
      * serialized session state, opaque to the domain.
      *
-     * @param tan the 4-digit code of the {@code otp} flow, null for {@code confirmInApp}
+     * @param tan the 4-digit {@code otp} or 6-digit {@code authenticator} code, null for {@code confirmInApp}
      */
     public String completeAuth(String processId, String tan) {
         log.info("Delegating TR login completion to tr-auth sidecar");
@@ -200,6 +225,23 @@ public class TradeRepublicAdapter {
                 "Trade Republic returned no session token", null);
         }
         return session;
+    }
+
+    /**
+     * Trade Republic's own CSV export of the account activity between two dates (inclusive),
+     * rendered by the sidecar from the stored session. The body is returned untouched: the
+     * caller's parser owns its format, and it carries personal data, so it is never logged here.
+     */
+    public String fetchTransactionsCsv(String sessionState, LocalDate from, LocalDate to) {
+        log.info("Fetching TR transactions export via tr-auth sidecar");
+        return sidecar.post(
+            "/transactions",
+            Map.of("sessionState", sessionState, "from", from.toString(), "to", to.toString()),
+            String.class,
+            transactionsTimeout,
+            "Could not fetch the Trade Republic transactions",
+            SidecarErrorCode.SESSION_EXPIRED
+        );
     }
 
     // ─── Data (WebSocket, no WAF needed) ──────────────────────────────────────
@@ -270,8 +312,9 @@ public class TradeRepublicAdapter {
                         session.receive()
                             .map(msg -> msg.getPayloadAsText())
                             .concatMap(text -> {
-                                log.info("TR WS <-- {}", text.length() > 500
-                                        ? text.substring(0, 500) + "…" : text);
+                                log.info("TR WS <-- {}", describeFrame(text));
+                                // Opt-in only: the payload is account data (numbers, balances, positions).
+                                log.trace("TR WS <-- payload: {}", text);
 
                                 if ("connected".equals(text.trim())) {
                                     int id1 = subIdCounter.incrementAndGet();
@@ -333,9 +376,8 @@ public class TradeRepublicAdapter {
                                     if (receivedPortfolioIds.add(account.externalId())) {
                                         receivedPortfolios.incrementAndGet();
                                     }
-                                    log.info("TR compactPortfolioByType [{}] raw: {}", account.name(),
-                                             payload.length() > 2000
-                                                     ? payload.substring(0, 2000) + "…" : payload);
+                                    log.info("TR compactPortfolioByType [{}] answered ({} chars)",
+                                             account.name(), payload.length());
                                     if ("E".equals(extractWsType(text))) {
                                         erroredPortfolioIds.add(account.externalId());
                                         expectedTickers.compareAndSet(-1, 0);
@@ -423,8 +465,8 @@ public class TradeRepublicAdapter {
                                             log.info("TR compactPortfolioByType [{}]: no positions found", account.name());
                                         }
                                     } catch (Exception ex) {
-                                        log.error("Failed to parse compactPortfolioByType [{}]: {}",
-                                            account.name(), payload, ex);
+                                        log.error("Failed to parse compactPortfolioByType [{}] ({})",
+                                            account.name(), ex.getClass().getSimpleName());
                                         erroredPortfolioIds.add(account.externalId());
                                         expectedTickers.compareAndSet(-1, 0);
                                     }
@@ -536,8 +578,8 @@ public class TradeRepublicAdapter {
                 }
             }
 
-            log.info("TR portfolio [{}]: {} positions, {} with live prices, total value: {}",
-                     secAccount.name(), positionsByIsin.size(), priced, totalPortfolioValue);
+            log.info("TR portfolio [{}]: {} positions, {} with live prices",
+                     secAccount.name(), positionsByIsin.size(), priced);
 
             List<TrPosition> positions = new ArrayList<>();
             for (var entry : positionsByIsin.entrySet()) {
@@ -609,6 +651,25 @@ public class TradeRepublicAdapter {
         int second = text.indexOf(' ', first + 1);
         if (second < 0) return text.substring(first + 1);
         return text.substring(second + 1);
+    }
+
+    /**
+     * A frame for the log: its subscription id, its type and its size. Never its payload: an
+     * answer carries the member's account numbers, balances and positions.
+     */
+    static String describeFrame(String text) {
+        String frame = text.trim();
+        int first = frame.indexOf(' ');
+        if (first < 0) {
+            return frame.length() <= 16 ? frame : "(" + text.length() + " chars)";
+        }
+        int second = frame.indexOf(' ', first + 1);
+        String id = frame.substring(0, first);
+        String type = second < 0 ? frame.substring(first + 1) : frame.substring(first + 1, second);
+        if (id.isEmpty() || !id.chars().allMatch(Character::isDigit) || type.length() != 1) {
+            return "(" + text.length() + " chars)";
+        }
+        return id + " " + type + " (" + text.length() + " chars)";
     }
 
     /** The frame type between the id and the payload: A (answer), D (delta), E (error), C (complete). */
@@ -855,7 +916,6 @@ public class TradeRepublicAdapter {
     }
 
     private List<TrAccountData> parseCashJson(String json) {
-        log.info("TR availableCash raw: {}", json);
         List<TrAccountData> accounts = new ArrayList<>();
         BigDecimal value = parseCashValue(json);
         if (value.compareTo(BigDecimal.ZERO) >= 0) {
@@ -885,7 +945,7 @@ public class TradeRepublicAdapter {
                 }
             }
         } catch (Exception ex) {
-            log.error("Failed to parse TR availableCash: {}", json, ex);
+            log.error("Failed to parse TR availableCash ({})", ex.getClass().getSimpleName());
         }
         return BigDecimal.ZERO;
     }

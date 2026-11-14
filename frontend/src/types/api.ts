@@ -1058,13 +1058,20 @@ export type TrErrorCode =
   | 'INTERNAL_ERROR'
 
 /** Same shape as every sidecar-backed session: a deactivated session reports `SESSION_EXPIRED`. */
-export type TrSessionStatus = SidecarSessionStatusOf<TrErrorCode>
+export type TrSessionStatus = SidecarSessionStatusOf<
+  TrErrorCode,
+  {
+    /** Phone stored with the session (e.g. `+33 * ** ** ** 78`), `null` when none: reconnect needs it. */
+    maskedPhone: string | null
+  }
+>
 
 /**
  * `confirmInApp`: the member confirms the login in the Trade Republic app and `auth/complete`
  * stays open until they do. `otp`: Trade Republic texted a 4-digit code the member types.
+ * `authenticator`: the member types the 6-digit code of their authenticator (TOTP) app.
  */
-export type TrAuthFlow = 'confirmInApp' | 'otp'
+export type TrAuthFlow = 'confirmInApp' | 'otp' | 'authenticator'
 
 export interface TrAuthInitResponse {
   processId: string
@@ -1343,6 +1350,76 @@ export type LbpAuthCompleteResponse = LbpSessionStatus
 
 /** `bankSessionRevoked` is always false: only Picsou's stored copy is deleted. */
 export interface LbpDeleteResponse {
+  removed: boolean
+  bankSessionRevoked: boolean
+  message: string
+}
+
+// --- BNP Paribas / Hello bank! ---
+
+export type BnpBrand = 'bnp' | 'hellobank'
+
+export type BnpErrorCode =
+  | 'INVALID_CREDENTIALS'
+  | 'INVALID_OTP'
+  | 'KEYPAD_CHANGED'
+  | 'KEYPAD_EXPIRED'
+  | 'INVALID_POSITIONS'
+  | 'MFA_TYPE_UNSUPPORTED'
+  | 'ACTION_REQUIRED'
+  | 'RATE_LIMITED'
+  | 'APP_VALIDATION_TIMEOUT'
+  | 'AUTH_ATTEMPT_EXPIRED'
+  | 'SESSION_EXPIRED'
+  | 'UPSTREAM_UNAVAILABLE'
+  | 'UPSTREAM_FORMAT_CHANGED'
+  | 'INVALID_SESSION_STATE'
+  | 'INTERNAL_ERROR'
+
+/** A product the sidecar saw but does not import: family code only, never the account id. */
+export interface BnpUnsupportedProduct {
+  externalId: string
+  familyCode: string
+}
+
+/** Mirrors `BnpSyncService.SessionStatusResponse`. */
+export interface BnpSessionStatus {
+  isActive: boolean
+  syncStatus: 'IDLE' | 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILED'
+  lastSyncStartedAt: string | null
+  lastSyncCompletedAt: string | null
+  lastSyncError: BnpErrorCode | null
+  unsupported: BnpUnsupportedProduct[]
+  unsupportedCount: number
+}
+
+/**
+ * The bank's shuffled keypad: the digit written on each of the ten keys, in the order the bank
+ * shows them (row by row). The member clicks his own digits; only the clicked positions (0..9)
+ * go back, never the digits.
+ */
+export interface BnpKeypad {
+  keys: string[]
+  columns: number
+}
+
+export interface BnpAuthInitResponse {
+  processId: string
+  keypad: BnpKeypad
+  /** Lifetime of the keypad step, not of the second-factor wait. */
+  expiresInSeconds: number
+}
+
+/** `CODE_REQUIRED`: an SMS code is typed in Picsou. `APPROVAL_PENDING`: approve in the bank's app. */
+export interface BnpAuthKeypadResponse {
+  processId: string
+  status: 'APPROVAL_PENDING' | 'CODE_REQUIRED'
+}
+
+export type BnpAuthCompleteResponse = BnpSessionStatus
+
+/** `bankSessionRevoked` is always false: only Picsou's stored copy is deleted. */
+export interface BnpDeleteResponse {
   removed: boolean
   bankSessionRevoked: boolean
   message: string

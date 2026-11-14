@@ -42,6 +42,7 @@ vi.mock('@/features/sync/hooks', () => ({
   useBankCountries: () => ({ data: undefined }),
   useInitiateBankSync: () => ({ mutate: vi.fn(), isPending: false }),
   useInitiateTrAuth: () => ({ mutate: initiateTrAuth, isPending: false }),
+  useReconnectTrAuth: () => ({ mutate: vi.fn(), isPending: false }),
   useCompleteTrAuth: () => ({ mutate: completeTrAuth, isPending: false }),
   useAddCryptoExchange: () => ({ mutate: addCryptoExchange, isPending: false }),
   useAddCryptoWallet: () => ({ mutate: vi.fn(), isPending: false }),
@@ -142,9 +143,7 @@ function fillPhoneAndPin() {
   fireEvent.change(screen.getByLabelText('sync.tr.phone'), {
     target: { value: '+33612345678' },
   })
-  const pinInput = screen.getAllByRole('textbox').find((input) => input !== screen.getByLabelText('sync.tr.phone'))
-  if (!pinInput) throw new Error('PIN input not found')
-  fireEvent.change(pinInput, { target: { value: '1234' } })
+  fireEvent.change(screen.getByLabelText('sync.tr.pin'), { target: { value: '1234' } })
 }
 
 describe('AddAccountModal Trade Republic wizard', () => {
@@ -481,6 +480,24 @@ describe('AddAccountModal Banque Populaire wizard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'banque-populaire-wizard' }))
 
     expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+})
+
+describe('AddAccountModal source rows', () => {
+  // jsdom does no layout, so the real geometry is covered by e2e/add-account-source-list.spec.ts;
+  // this pins the classes that keep a long description inside its row and the arrow in place.
+  it('lets a long description wrap in the row and keeps the arrow fixed-size', () => {
+    render(<AddAccountModal open onOpenChange={vi.fn()} />)
+
+    const description = screen.getByText('addAccount.desc.caisseEpargne')
+    expect(description).toHaveClass('line-clamp-2')
+    expect(description).toHaveAttribute('title', 'addAccount.desc.caisseEpargne')
+
+    const column = description.parentElement!
+    expect(column).toHaveClass('min-w-0', 'flex-1', 'whitespace-normal')
+
+    const row = column.parentElement!
+    expect(row.querySelector('svg.lucide-arrow-right')).toHaveClass('shrink-0')
   })
 })
 
