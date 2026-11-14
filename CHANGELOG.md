@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **American Express login no longer stalls behind the cookie banner.** When the consent banner
+  showed up after the login form, it blocked the sign-in click and the connection failed with
+  "Impossible de joindre American Express". It is now declined whenever it appears (#568).
+
 - **"Financial assets" on the dashboard counted money lent to people.** In that mode the
   figure and the curve included a peer loan, while the donut beside them did not, so the two
   disagreed (a 1,000 livret, a 5,000 PEA and 2,000 lent showed 8,000 next to a donut adding
