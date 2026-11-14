@@ -31,7 +31,7 @@
     "currency": "EUR",
     "category": "Catégorie",
     "done": "Terminé",
-    "labelColon": "{{label}}\u00a0:"
+    "labelColon": "{{label}} :"
   },
   "nav": {
     "dashboard": "Tableau de bord",
@@ -851,8 +851,8 @@
     "noGoals": "Aucun objectif défini",
     "waiting": "En cours",
     "calendar": "Calendrier",
-    "legendProgress": "Part de l'objectif du mois atteinte (ex. 94\u00a0%)",
-    "legendOvershoot": "Dépassement de l'objectif (ex. +8\u00a0%)",
+    "legendProgress": "Part de l'objectif du mois atteinte (ex. 94 %)",
+    "legendOvershoot": "Dépassement de l'objectif (ex. +8 %)",
     "viewGrid": "Grille annuelle",
     "viewTimeline": "Chronologie",
     "viewCalendar": "Calendrier",
@@ -1149,7 +1149,7 @@
       "previewCount_other": "{{count}} transactions seront modifiées",
       "previewCapped": "Affichage des 200 premières correspondances sur {{count}}",
       "createRule": "Créer une règle",
-      "ruleActive": "Règle : {{pattern}}"
+      "ruleActive": "Règle\u00a0: {{pattern}}"
     },
     "settings": {
       "cycleTitle": "Jour de paie",
@@ -1206,8 +1206,9 @@
       "property": "Maison, appartement, terrain…",
       "fortuneo": "Synchroniser vos comptes Fortuneo",
       "caisseEpargne": "Compte courant, Livret A, LDDS, PEL, LEP, PER, assurance vie, prêts et cartes à la Caisse d'Epargne",
-      "banquePopulaire": "Compte courant, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, compte à terme et parts sociales à la Banque Populaire",
-      "lbp": "Compte courant, Livret A et LEP à La Banque Postale"
+      "banquePopulaire": "Compte courant, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, compte à terme, parts sociales et PER à la Banque Populaire",
+      "lbp": "Compte courant, Livret A et LEP à La Banque Postale",
+      "bnp": "Comptes courants, épargne, titres et assurance vie chez BNP Paribas ou Hello bank!"
     }
   },
   "sync": {
@@ -1252,7 +1253,7 @@
     "tr": {
       "title": "Trade Republic",
       "phone": "Numéro de téléphone",
-      "pin": "Code PIN",
+      "pin": "Code PIN ou mot de passe",
       "tan": "Code de vérification",
       "connect": "Connecter",
       "sync": "Synchroniser",
@@ -1260,21 +1261,35 @@
       "clearSession": "Déconnecter",
       "noSession": "Aucune session active",
       "sessionActive": "Session active",
-      "expiresAt": "Expire le",
       "errors": {
         "tooManyAttempts": "Trop de tentatives. Réessayez dans quelques minutes.",
         "invalidPhoneNumber": "Numéro de téléphone invalide.",
-        "invalidPin": "Code PIN incorrect.",
+        "invalidPin": "Code PIN ou mot de passe incorrect.",
         "invalidTan": "Code de vérification incorrect ou expiré. Utilisez le dernier code reçu, ou relancez l'étape pour en recevoir un nouveau.",
         "authenticationFailed": "Échec de l'authentification Trade Republic.",
         "serviceUnavailable": "Le service Trade Republic local n'est pas disponible. Relancez les serveurs puis réessayez.",
-        "temporarilyBlocked": "Trade Republic a bloqué la requête. Réessayez dans une minute.",
         "serverError": "Erreur serveur Trade Republic. Réessayez.",
         "phoneNumberRequired": "Numéro de téléphone requis.",
-        "pinRequired": "Code PIN requis.",
+        "pinRequired": "Code PIN ou mot de passe requis.",
         "validationFailed": "Données invalides.",
-        "unknownError": "Une erreur inattendue s'est produite."
-      }
+        "unknownError": "Une erreur inattendue s'est produite.",
+        "invalidCredentials": "Numéro de téléphone ou code PIN/mot de passe Trade Republic incorrect.",
+        "appValidationTimeout": "La connexion n'a pas été confirmée dans l'application à temps. Recommencez la connexion.",
+        "appValidationCancelled": "La connexion a été refusée dans l'application Trade Republic. Recommencez la connexion.",
+        "authAttemptExpired": "La tentative d'authentification a expiré. Recommencez la connexion.",
+        "sessionExpired": "La session Trade Republic a expiré. Reconnectez-vous."
+      },
+      "appConfirmPrompt": "Ouvrez l'application Trade Republic et confirmez la connexion.",
+      "appConfirmHint": "Cette page se met à jour dès que vous avez confirmé.",
+      "countdownLabel": "Temps restant :",
+      "queued": "Synchronisation en attente…",
+      "syncing": "Synchronisation en cours…",
+      "syncSuccess": "Dernière synchronisation réussie.",
+      "staleAccounts": "Vos comptes Trade Republic ne sont plus mis à jour : leur session a pris fin. Reconnectez-vous ci-dessous pour reprendre la synchronisation quotidienne.",
+      "authenticatorCode": "Code de l'application d'authentification",
+      "authenticatorPrompt": "Saisissez le code à 6 chiffres de votre application d'authentification, puis confirmez la connexion dans l'app Trade Republic.",
+      "reconnectPhone": "Numéro de téléphone",
+      "useAnotherNumber": "Utiliser un autre numéro"
     },
     "revolut": {
       "title": "Revolut",
@@ -1583,7 +1598,7 @@
       "openRevolut": "Ouvrir la page Revolut pour se connecter",
       "sessionExpired": "Session expirée",
       "reconnect": "Se reconnecter depuis l'onglet du fournisseur",
-      "trManualInfo": "Trade Republic est la seule banque qui nécessite une reconnexion manuelle. Vous devrez ressaisir votre numéro et PIN à chaque synchronisation.",
+      "trManualInfo": "Les sessions Trade Republic expirent au bout d'environ 24 heures. Pour vous reconnecter, ressaisissez votre PIN ou mot de passe ; le numéro est conservé.",
       "trSlowWarning": "La connexion peut prendre quelques instants, c'est normal.",
       "revolutManualInfo": "Revolut nécessite une approbation sur votre téléphone. Cliquez sur l'icône pour saisir vos identifiants."
     },
@@ -1674,6 +1689,9 @@
     "banquePopulaire": {
       "title": "Banque Populaire",
       "customerId": "Identifiant",
+      "rememberedIdentifier": "Identifiant mémorisé",
+      "useAnotherIdentifier": "Utiliser un autre identifiant",
+      "backToRememberedIdentifier": "Utiliser l'identifiant mémorisé",
       "region": "Votre Banque Populaire",
       "regionPlaceholder": "Choisissez votre banque",
       "connect": "Se connecter",
@@ -1687,7 +1705,7 @@
       "disconnectConfirmAction": "Supprimer la session conservée",
       "noSession": "Aucune session active",
       "sessionActive": "Session active",
-      "scope": "Synchronise à la demande vos comptes courants, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, comptes à terme et parts sociales Banque Populaire. Seule la session est conservée, chiffrée. Les contrats que Picsou ne sait pas importer sont listés mais jamais créés.",
+      "scope": "Synchronise à la demande vos comptes courants, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, comptes à terme, parts sociales et PER Banque Populaire. Seuls la session et votre identifiant sont conservés, chiffrés ; jamais votre mot de passe. Les contrats que Picsou ne sait pas importer sont listés mais jamais créés.",
       "notice": {
         "neverStored": "Picsou ne voit et ne conserve jamais votre mot de passe. Vous le saisissez vous-même sur le clavier de la banque ; seules les positions des touches sont envoyées, une seule fois.",
         "noRetry": "Picsou ne réessaie jamais une connexion. En cas d'échec, rien n'est renvoyé tant que vous ne validez pas le formulaire vous-même.",
@@ -2111,6 +2129,73 @@
         "formatChanged": "Le format du portefeuille Fortuneo a changé. Vos données existantes ont été conservées.",
         "invalidData": "Fortuneo a renvoyé des données incohérentes. Vos données existantes ont été conservées.",
         "serverError": "Impossible de joindre Fortuneo. Veuillez réessayer."
+      }
+    },
+    "bnp": {
+      "title": "BNP Paribas / Hello bank!",
+      "customerId": "Numéro client",
+      "brand": "Banque",
+      "brands": {
+        "bnp": "BNP Paribas",
+        "hellobank": "Hello bank!"
+      },
+      "connect": "Se connecter",
+      "connecting": "Connexion…",
+      "sync": "Synchroniser",
+      "queued": "Synchronisation en attente…",
+      "syncing": "Synchronisation…",
+      "syncSuccess": "La dernière synchronisation a réussi.",
+      "clearSession": "Déconnecter",
+      "disconnectConfirm": "Supprimer la session BNP Paribas / Hello bank! stockée dans Picsou ? La session côté banque n'est pas révoquée.",
+      "disconnectConfirmAction": "Supprimer la session",
+      "noSession": "Aucune session",
+      "sessionActive": "Session active",
+      "scope": "Importe les comptes courants, l'épargne, les comptes titres (PEA, compte-titres) avec leurs positions, l'assurance vie (solde uniquement) et les crédits, dans la mesure où le site de la banque les expose. Les produits que Picsou ne reconnaît pas sont listés, jamais devinés.",
+      "notice": {
+        "neverStored": "Votre mot de passe n'est jamais stocké : vous le saisissez sur le clavier de la banque, affiché ci-dessous.",
+        "noRetry": "Une seule tentative est faite. Un mauvais mot de passe compte dans la limite de la banque et rien n'est rejoué automatiquement.",
+        "lockRisk": "Trop d'essais erronés peuvent bloquer votre accès à la banque.",
+        "unverified": "Pas encore vérifié sur un vrai compte : la page de connexion a été contrôlée, mais la double authentification et l'import suivent le module open source woob."
+      },
+      "approvalPrompt": "Validez la connexion dans l'application mobile de votre banque.",
+      "approvalHint": "Cette page attend votre validation, puis importe vos comptes.",
+      "countdownLabel": "Temps restant :",
+      "codePrompt": "Saisissez le code reçu par SMS de la banque.",
+      "codeHint": "Le code est envoyé une seule fois à la banque et jamais stocké.",
+      "code": "Code SMS",
+      "sendCode": "Envoyer le code",
+      "sendingCode": "Envoi…",
+      "unsupportedTitle": "Produits non importés",
+      "unsupportedHint": "Picsou n'importe pas encore ces produits. Seul le code de famille du produit est affiché.",
+      "errors": {
+        "invalidIdentifier": "Le numéro client doit comporter de 7 à 10 chiffres.",
+        "invalidCredentials": "La banque a refusé ces identifiants. Patientez avant de réessayer.",
+        "invalidCode": "Le code est incorrect. Vérifiez le SMS et réessayez.",
+        "keypadChanged": "La page de connexion de la banque a changé. Rien n'a été envoyé.",
+        "keypadExpired": "Le clavier a expiré. Recommencez.",
+        "invalidPositions": "La réponse du clavier a été refusée. Recommencez.",
+        "mfaUnsupported": "Cette double authentification n'est pas prise en charge par Picsou.",
+        "actionRequired": "La banque exige une action sur son propre site (changement de mot de passe ou réactivation).",
+        "rateLimited": "Trop de tentatives. Patientez avant de réessayer.",
+        "rateLimitedRetryAfter": "Trop de tentatives. Réessayez dans environ {{minutes}} min.",
+        "tooManySyncs": "Trop de synchronisations. Patientez avant de réessayer.",
+        "tooManySyncsRetryAfter": "Trop de synchronisations. Réessayez dans environ {{minutes}} min.",
+        "appValidationTimeout": "La validation n'est pas arrivée à temps. Recommencez.",
+        "authAttemptExpired": "Cette tentative de connexion a expiré. Recommencez.",
+        "sessionExpired": "La session a expiré. Reconnectez-vous.",
+        "formatChanged": "Le site de la banque ne ressemble plus à ce qui est attendu. Rien n'a été importé.",
+        "invalidSessionState": "La session stockée est inutilisable. Reconnectez-vous.",
+        "serverError": "Un problème est survenu. Réessayez plus tard."
+      },
+      "keypad": {
+        "title": "Cliquez votre mot de passe",
+        "description": "Cliquez les touches affichant les six chiffres de votre mot de passe, dans l'ordre. Les touches sont mélangées par la banque. Picsou ne voit pas vos chiffres.",
+        "key": "Touche {{position}}",
+        "entered": "{{count}} chiffre(s) sur 6 saisi(s)",
+        "countdownLabel": "Temps restant :",
+        "cancel": "Annuler",
+        "clear": "Effacer",
+        "validate": "Valider"
       }
     }
   },

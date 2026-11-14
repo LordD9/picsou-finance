@@ -54,10 +54,15 @@ class InitiateHarness(unittest.IsolatedAsyncioTestCase):
         )
         self.addAsyncCleanup(self.store.close_all)
 
+    async def open_login_form(self, page):
+        await page.goto(main.LOGIN_URL)
+
     def run_initiate(self, outcome, **fields):
         patches = (
             patch.object(main, "_pending", self.store),
             patch.object(main, "AsyncCamoufox", return_value=self.camoufox),
+            # The form wait has its own tests (test_login_form.py); here it only opens the page.
+            patch.object(main, "_open_login_form", AsyncMock(side_effect=self.open_login_form)),
             patch.object(main, "_wait_for_login_outcome", AsyncMock(return_value=outcome)),
             patch.object(main, "_select_otp_method", self.select_otp),
             patch.object(main, "_find_otp_input", AsyncMock()),

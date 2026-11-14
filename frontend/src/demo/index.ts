@@ -1474,6 +1474,42 @@ handlers.set(key('DELETE', '/lbp/session'), () => {
   return { removed: true, bankSessionRevoked: false, message: '' }
 })
 
+// BNP Paribas / Hello bank! — same shortcut: a demo keypad (text keys), an app approval, then a session.
+let demoBnpAuthenticated = false
+let demoBnpSynced = false
+const demoBnpStatus = () => ({
+  isActive: demoBnpAuthenticated,
+  syncStatus: demoBnpSynced ? 'SUCCESS' : 'IDLE',
+  lastSyncStartedAt: null,
+  lastSyncCompletedAt: demoBnpSynced ? '2026-11-06T12:00:00Z' : null,
+  lastSyncError: null,
+  unsupported: [],
+  unsupportedCount: 0,
+})
+handlers.set(key('GET', '/bnp/status'), () => demoBnpStatus())
+handlers.set(key('POST', '/bnp/auth/initiate'), () => ({
+  processId: 'demo',
+  keypad: { keys: ['3', '8', '1', '0', '5', '9', '2', '7', '4', '6'], columns: 5 },
+  expiresInSeconds: 300,
+}))
+handlers.set(key('POST', '/bnp/auth/keypad'), () => ({
+  processId: 'demo', status: 'APPROVAL_PENDING',
+}))
+handlers.set(key('POST', '/bnp/auth/complete'), () => {
+  demoBnpAuthenticated = true
+  return demoBnpStatus()
+})
+handlers.set(key('POST', '/bnp/sync'), () => {
+  demoBnpAuthenticated = true
+  demoBnpSynced = true
+  return demoBnpStatus()
+})
+handlers.set(key('DELETE', '/bnp/session'), () => {
+  demoBnpAuthenticated = false
+  demoBnpSynced = false
+  return { removed: true, bankSessionRevoked: false, message: '' }
+})
+
 // Banque Populaire — the same BPCE login as Caisse d'Epargne, so the same shortcut:
 // any region and identifier get the demo pad, and Sécur'Pass answers connected at once.
 // Completing the sign-in makes the session live but not yet synced; only the sync answers
@@ -1606,16 +1642,31 @@ handlers.set(key('GET', '/revolut/status'), () => ({ connected: false, remembere
 handlers.set(key('GET', '/revolut/sync/progress'), () => demoIdleSyncProgress)
 
 // Trade Republic - session status
-handlers.set(key('GET', '/tr/status'), () => ({ isActive: false, expiresAt: null }))
+const demoTrStatus = {
+  isActive: false,
+  syncStatus: 'IDLE',
+  lastSyncStartedAt: null,
+  lastSyncCompletedAt: null,
+  lastSyncError: null,
+  maskedPhone: '+33 * ** ** ** 78',
+}
+handlers.set(key('GET', '/tr/status'), () => demoTrStatus)
 
 // Trade Republic - initiate auth
-handlers.set(key('POST', '/tr/auth/initiate'), () => ({ processId: 'demo-tr-process' }))
+handlers.set(key('POST', '/tr/auth/initiate'), () => ({
+  processId: 'demo-tr-process', flow: 'confirmInApp', countdownInSeconds: 120,
+}))
+
+// Trade Republic - reconnect with the stored phone (PIN or password only)
+handlers.set(key('POST', '/tr/auth/reconnect'), () => ({
+  processId: 'demo-tr-process', flow: 'confirmInApp', countdownInSeconds: 120,
+}))
 
 // Trade Republic - complete auth
-handlers.set(key('POST', '/tr/auth/complete'), () => [])
+handlers.set(key('POST', '/tr/auth/complete'), () => demoTrStatus)
 
 // Trade Republic - sync
-handlers.set(key('POST', '/tr/sync'), () => [])
+handlers.set(key('POST', '/tr/sync'), () => demoTrStatus)
 
 // Trade Republic - import CSV
 handlers.set(key('POST', '/tr/import'), () => [])

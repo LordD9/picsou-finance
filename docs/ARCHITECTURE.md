@@ -19,9 +19,9 @@ com.picsou/
 ├── model/          JPA entities — financial: Account, AccountHolding, Transaction,
 │                   BalanceSnapshot, Goal, GoalManualContribution, GoalContributor,
 │                   Debt, RealEstateMetadata, PropertyValuation, AccountOwnership, WalletAddress;
-│                   integrations: Requisition, TradeRepublicSession, CryptoExchangeSession,
+│                   integrations: Requisition, CryptoExchangeSession,
 │                   FinarySession, DegiroSession, RevolutSession,
-│                   SidecarSession (one row per sidecar bank and member),
+│                   SidecarSession (one row per sidecar bank and member, Trade Republic included),
 │                   PriceSnapshot;
 │                   identity & sharing: AppUser, FamilyMember, UserRole, SharingSettings,
 │                   SharingLevel, SharedResource, UserMfa, UserMfaRecoveryCode,
@@ -137,7 +137,7 @@ After the prices, the same pass queues a background lookup of share and ETF logo
 Client → TradeRepublicController → TRSyncService → TRAdapter → tr-auth (Python) → TR WebSocket
 ```
 
-Broker sync via Python microservice (Playwright automation). Two modes: automatic WebSocket sync and CSV import fallback. Session persisted in `TradeRepublicSession` entity.
+Broker sync via the `tr-auth` Python sidecar (login confirmed in the Trade Republic app, session refresh); the backend reads the portfolio over the WebSocket. Two modes: automatic sync and CSV import fallback. The session is a `SidecarSession` row (bank `TRADE_REPUBLIC`), synced through `SidecarSyncTemplate` like the other sidecar banks.
 
 ### 4. Bourse Direct
 
@@ -322,8 +322,9 @@ and the [ADR](./decisions/2026-11-04-sso-login-alongside-passwords.md).
 | BoursoBank | Current accounts, livrets and PEA/CTO sync via internal Python sidecar | `BOURSO_AUTH_URL` |
 | CORUM | SCPI shares and CORUM Life (assurance-vie) contracts via internal Python sidecar (`corum-auth`) | `CORUM_AUTH_URL` |
 | Caisse d'Epargne | Current account, Livret A, Livret Jeune, LDDS, card, loans and PER via internal Python sidecar; browser-assisted login (keypad + Sécur'Pass), on demand | `CAISSE_EPARGNE_AUTH_URL` |
-| Banque Populaire | Current account, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, term deposits and cooperative shares (no cards) via internal Python sidecar sharing the BPCE code with Caisse d'Epargne; region + keypad + Sécur'Pass login, on demand | `BANQUE_POPULAIRE_AUTH_URL` |
+| Banque Populaire | Current account, Livret A, Livret Jeune, LDDS, Compte sur Livret, PEL, term deposits, cooperative shares (no cards) and PER via internal Python sidecar sharing the BPCE code with Caisse d'Epargne; region + keypad + Sécur'Pass login, on demand | `BANQUE_POPULAIRE_AUTH_URL` |
 | La Banque Postale | Current account and livrets (Livret A, LDDS, LEP) via internal Chromium login sidecar, on demand | `LBP_AUTH_URL` |
+| BNP Paribas / Hello bank! | Current accounts, savings, PEA/CTO, life insurance, PER and loans, and transaction history via internal Camoufox sidecar (`bnp-auth`); customer number, keypad clicked in the member's browser, then app approval or SMS code, on demand | `BNP_AUTH_URL` |
 | Natixis Interépargne | PEE and PER employee-savings plans and their operations history via internal Python sidecar (`natixis-auth`); SMS, voice or e-mail code once, then the refresh token | `NATIXIS_AUTH_URL` |
 | DEGIRO | Compte-titres sync via internal Python sidecar (`degiro-auth` in `docker/docker-compose.yml`) | `DEGIRO_AUTH_URL` |
 | Binance | Crypto exchange balances | Via CryptoExchangePort |

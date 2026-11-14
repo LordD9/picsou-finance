@@ -18,7 +18,6 @@ import com.picsou.repository.IbkrConnectionRepository;
 import com.picsou.repository.RequisitionRepository;
 import com.picsou.repository.SimplefinConnectionRepository;
 import com.picsou.repository.WiseConnectionRepository;
-import com.picsou.repository.TradeRepublicSessionRepository;
 import com.picsou.repository.WalletAddressRepository;
 import com.picsou.model.LbpSyncStatus;
 import com.picsou.model.SidecarSyncStatus;
@@ -48,7 +47,6 @@ class SyncStatusServiceTest {
     @Mock RevolutSyncService revolutSyncService;
     @Mock RequisitionRepository requisitionRepository;
     @Mock TradeRepublicSyncService tradeRepublicSyncService;
-    @Mock TradeRepublicSessionRepository tradeRepublicSessionRepository;
     @Mock BoursoSyncService boursoSyncService;
     @Mock BourseDirectSyncService bourseDirectSyncService;
     @Mock AmundiSyncService amundiSyncService;
@@ -57,6 +55,7 @@ class SyncStatusServiceTest {
     @Mock CicSyncService cicSyncService;
     @Mock CorumSyncService corumSyncService;
     @Mock LbpSyncService lbpSyncService;
+    @Mock BnpSyncService bnpSyncService;
     @Mock FortuneoSyncService fortuneoSyncService;
     @Mock AmexSyncService amexSyncService;
     @Mock IbkrConnectionRepository ibkrConnectionRepository;
@@ -72,9 +71,10 @@ class SyncStatusServiceTest {
     @BeforeEach
     void setUp() {
         service = new SyncStatusService(
-            revolutSyncService, requisitionRepository, tradeRepublicSyncService, tradeRepublicSessionRepository,
+            revolutSyncService, requisitionRepository, tradeRepublicSyncService,
             boursoSyncService, bourseDirectSyncService, amundiSyncService, cmesSyncService, cicSyncService, corumSyncService, natixisSyncService,
             lbpSyncService,
+            bnpSyncService,
             fortuneoSyncService,
             amexSyncService, ibkrConnectionRepository, simplefinConnectionRepository, wiseConnectionRepository,
             cryptoExchangeSyncService,
@@ -82,9 +82,8 @@ class SyncStatusServiceTest {
             finarySessionRepository, degiroSessionRepository);
         when(revolutSyncService.getStatus(MID)).thenReturn(new RevolutSyncService.StatusResponse(false, false, null));
         when(requisitionRepository.findAllByMemberId(MID)).thenReturn(List.of());
-        when(tradeRepublicSyncService.getSessionStatus(MID))
-            .thenReturn(new TradeRepublicSyncService.SessionStatusResponse(false, null));
-        when(tradeRepublicSessionRepository.findByMemberId(MID)).thenReturn(Optional.empty());
+        when(tradeRepublicSyncService.getStatus(MID)).thenReturn(
+            new TradeRepublicSyncService.SessionStatusResponse(false, SidecarSyncStatus.IDLE, null, null, null, null));
         when(boursoSyncService.getStatus(MID)).thenReturn(
             new BoursoSyncService.SessionStatusResponse(false, SidecarSyncStatus.IDLE, null, null, null));
         when(bourseDirectSyncService.getStatus(MID)).thenReturn(
@@ -96,6 +95,7 @@ class SyncStatusServiceTest {
         when(corumSyncService.getStatus(MID)).thenReturn(CorumSyncService.SessionStatusResponse.inactive());
         when(natixisSyncService.getStatus(MID)).thenReturn(NatixisSyncService.SessionStatusResponse.inactive());
         when(lbpSyncService.getStatus(MID)).thenReturn(LbpSyncService.SessionStatusResponse.inactive());
+        when(bnpSyncService.getStatus(MID)).thenReturn(BnpSyncService.SessionStatusResponse.inactive());
         when(fortuneoSyncService.getStatus(MID)).thenReturn(
             new FortuneoSyncService.SessionStatusResponse(false, null, SidecarSyncStatus.IDLE, null, null, null));
         when(amexSyncService.getStatus(MID)).thenReturn(
@@ -164,6 +164,25 @@ class SyncStatusServiceTest {
             false, SidecarSyncStatus.FAILED, null, SYNCED_AT, SidecarErrorCode.INVALID_CREDENTIALS, 0, false));
         assertThat(service.describe(MID))
             .contains("corum: NEEDS_REAUTH lastSync=2026-10-04T06:00:00Z reauth=true — INVALID_CREDENTIALS");
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = SidecarErrorCode.class, names = {"SESSION_EXPIRED", "INVALID_SESSION_STATE"})
+    void tradeRepublicSessionEndingErrorsRequireReconnection(SidecarErrorCode error) {
+        when(tradeRepublicSyncService.getStatus(MID)).thenReturn(new TradeRepublicSyncService.SessionStatusResponse(
+            false, SidecarSyncStatus.FAILED, null, SYNCED_AT, error, null));
+
+        assertThat(service.describe(MID)).contains(
+            "trade-republic: NEEDS_REAUTH lastSync=2026-10-04T06:00:00Z reauth=true — " + error.name());
+    }
+
+    @Test
+    void tradeRepublicTransientFailureIsRetriedWithoutReconnection() {
+        when(tradeRepublicSyncService.getStatus(MID)).thenReturn(new TradeRepublicSyncService.SessionStatusResponse(
+            true, SidecarSyncStatus.FAILED, null, SYNCED_AT, SidecarErrorCode.UPSTREAM_UNAVAILABLE, null));
+
+        assertThat(service.describe(MID)).contains(
+            "trade-republic: FAILED lastSync=2026-10-04T06:00:00Z reauth=false — UPSTREAM_UNAVAILABLE");
     }
 
     @ParameterizedTest
